@@ -1,0 +1,38 @@
+# --- Python -----------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# --- Virtual environments ---------------------------------------------------
+.venv/
+venv/
+env/
+
+# --- Environment / secrets --------------------------------------------------
+.env
+
+# --- Runtime data ---------------------------------------------------------
+logs/
+cache/
+backups/
+exports/
+*.db
+*.db-journal
+*.sqlite3
+
+# --- Tooling ----------------------------------------------------------------
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+
+# --- Editors ----------------------------------------------------------------
+.idea/
+.vscode/
+*.swp
+
+# --- Large binary archives (kept out of git; source of truth is the tree) ----
+NOXbot.zip
+NOXbott1.zip
