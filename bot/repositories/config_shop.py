@@ -154,6 +154,20 @@ class ConfigProductRepository(BaseRepository[ConfigProduct]):
         result = await self.session.execute(stmt)
         return result.scalar_one_or_none()
 
+    async def increase_stock(self, product_id: str, quantity: int = 1) -> None:
+        """Release/increase config stock (mirrors ProductRepository.increase_stock).
+
+        Used when a cart reservation is released (item removed / quantity
+        lowered) and when an order is cancelled or refunded.
+        """
+        product = await self.get(product_id)
+        if product is None or product.unlimited_stock or quantity <= 0:
+            return
+        product.stock += quantity
+        if product.stock > 0 and product.status == ConfigProductStatus.OUT_OF_STOCK:
+            product.status = ConfigProductStatus.ACTIVE
+        await self.session.flush()
+
     async def reserve_stock(self, product_id: str, quantity: int) -> bool:
         """Atomically reserve stock for a config product (Bug #3 fixed).
         

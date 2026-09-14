@@ -107,7 +107,11 @@ async def cb_aorder_page(callback: CallbackQuery, uow, user: User) -> None:
     if len(parts) < 3:
         await callback.answer("داده‌های نامعتبر", show_alert=True)
         return
-    page = int(parts[2])
+    try:
+        page = int(parts[2])
+    except ValueError:
+        await callback.answer("داده‌های نامعتبر", show_alert=True)
+        return
     filter_tag = parts[3] if len(parts) > 3 else "default"
     await _list_orders(callback, uow, user, page, filter_tag)
 
@@ -165,8 +169,13 @@ async def cb_aorder_fs_status(callback: CallbackQuery, uow, user: User) -> None:
         await callback.answer("وضعیت نامعتبر", show_alert=True)
         return
     val = parts[2]
+    try:
+        status = OrderStatus(val)
+    except ValueError:
+        await callback.answer("وضعیت نامعتبر", show_alert=True)
+        return
     f = _ACTIVE_FILTERS.setdefault(user.telegram_id, {})
-    f["status"] = OrderStatus(val)
+    f["status"] = status
     await callback.answer("فیلتر وضعیت اعمال شد")
     await cb_aorder_filter(callback)
 

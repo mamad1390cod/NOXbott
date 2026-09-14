@@ -13,7 +13,7 @@ from bot.utils.format import format_price
 router = Router(name="profile")
 
 
-@router.message(F.text == "/profile" or F.text == "/panel")
+@router.message((F.text == "/profile") | (F.text == "/panel"))
 async def cmd_profile(message: Message, uow, user: User) -> None:
     """Show user profile."""
     text = (

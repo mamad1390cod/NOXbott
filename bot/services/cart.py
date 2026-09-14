@@ -183,8 +183,40 @@ class CartService(BaseService):
                 await self.uow.session.flush()
             raise
 
+    async def _release_item_stock(self, item: CartItem, quantity: int | None = None) -> None:
+        """Give back a cart item's reserved stock (item removed / qty lowered).
+
+        Adding to the cart reserves stock atomically; every path that drops the
+        reserved quantity must release it, otherwise abandoned/edited carts leak
+        inventory permanently.
+        """
+        qty = item.quantity if quantity is None else quantity
+        if qty <= 0:
+            return
+        if item.product_id:
+            await self.uow.products.increase_stock(item.product_id, qty)
+        elif item.config_product_id:
+            await self.uow.config_products.increase_stock(item.config_product_id, qty)
+
+    async def _reserve_extra_stock(self, item: CartItem, extra: int) -> None:
+        """Reserve ``extra`` additional units for an existing cart item."""
+        if extra <= 0:
+            return
+        if item.product_id:
+            product = await self.uow.products.get(item.product_id)
+            if product and product.unlimited_stock:
+                return
+            if not await self.uow.products.reserve_stock(item.product_id, extra):
+                raise ValueError("موجودی کافی نیست")
+        elif item.config_product_id:
+            config = await self.uow.config_products.get(item.config_product_id)
+            if config and config.unlimited_stock:
+                return
+            if not await self.uow.config_products.reserve_stock(item.config_product_id, extra):
+                raise ValueError("موجودی کافی نیست")
+
     async def update_quantity(self, user_id: str, item_id: str, quantity: int) -> CartItem | None:
-        """Update item quantity in cart."""
+        """Update item quantity in cart, keeping the stock reservation in sync."""
         cart = await self.get_cart(user_id)
         if not cart:
             raise ValueError("سبد خرید یافت نشد")
@@ -193,20 +225,22 @@ class CartService(BaseService):
         if not item or item.cart_id != cart.id:
             raise ValueError("آیتم در سبد خرید یافت نشد")
 
-        # Check stock for products
-        if item.product_id:
-            product = await self.uow.products.get(item.product_id)
-            if product and not product.unlimited_stock and product.stock < quantity:
-                raise ValueError("موجودی کافی نیست")
-        elif item.config_product_id:
-            config = await self.uow.config_products.get(item.config_product_id)
-            if config and not config.unlimited_stock and config.stock < quantity:
-                raise ValueError("موجودی کافی نیست")
+        if quantity <= 0:
+            # Removing the line entirely → release what it reserved.
+            await self._release_item_stock(item)
+            return await self.uow.carts.update_quantity(item_id, quantity)
+
+        delta = quantity - item.quantity
+        if delta > 0:
+            # The requested units are *not* reserved yet: reserve the difference.
+            await self._reserve_extra_stock(item, delta)
+        elif delta < 0:
+            await self._release_item_stock(item, -delta)
 
         return await self.uow.carts.update_quantity(item_id, quantity)
 
     async def remove_item(self, user_id: str, item_id: str) -> bool:
-        """Remove item from cart."""
+        """Remove item from cart and release its reserved stock."""
         cart = await self.get_cart(user_id)
         if not cart:
             raise ValueError("سبد خرید یافت نشد")
@@ -215,13 +249,16 @@ class CartService(BaseService):
         if not item or item.cart_id != cart.id:
             raise ValueError("آیتم در سبد خرید یافت نشد")
 
+        await self._release_item_stock(item)
         return await self.uow.carts.remove_item(item_id)
 
     async def clear_cart(self, user_id: str) -> int:
-        """Clear all items from cart."""
+        """Clear all items from cart (releases every reservation)."""
         cart = await self.get_cart(user_id)
         if not cart:
             return 0
+        for item in list(cart.items):
+            await self._release_item_stock(item)
         # Also clear discount code when clearing cart
         cart.discount_code = None
         cart.discount_amount = 0

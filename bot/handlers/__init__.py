@@ -7,6 +7,7 @@ by an admin check (handled in the admin_panel router via a global filter).
 from aiogram import Router
 
 from bot.handlers import (
+    account,
     cart,
     configs,
     custom_cart,
@@ -68,6 +69,7 @@ def _build_user_router() -> Router:
         my_account.router,
         notify_prefs.router,
         topup.router,
+        account.router,
     ):
         r.include_router(sub)
     return r

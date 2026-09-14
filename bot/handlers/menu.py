@@ -52,7 +52,7 @@ async def cmd_start(message: Message, uow: UnitOfWork, user: User) -> None:
     )
 
 
-@router.message(F.text.lower() == "منو" or F.text == "/menu")
+@router.message((F.text.lower() == "منو") | (F.text == "/menu"))
 async def cmd_menu(message: Message) -> None:
     """Handle /menu command."""
     await _send_main_menu(message, edit=False)
@@ -82,7 +82,7 @@ async def cb_bot_builder(callback: CallbackQuery) -> None:
     await callback.answer()
 
 
-@router.callback_query(F.data == "noop" or F.data == "action:noop")
+@router.callback_query((F.data == "noop") | (F.data == "action:noop"))
 async def cb_noop(callback: CallbackQuery) -> None:
     """Handle no-op button clicks."""
     await callback.answer()

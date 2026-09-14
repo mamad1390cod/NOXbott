@@ -291,22 +291,31 @@ class OrderService(BaseService):
         Bug #4/#16 fixed: Now increments discount code usage.
         """
         order = await self.uow.orders.get_with_items(order.id)
-        if not await self.uow.orders.decrement_items_stock(order):
-            raise OrderStatusError("موجودی یکی از محصولات کافی نیست")
+
+        # Stock is reserved atomically when the item enters the cart
+        # (``CartService.add_product`` / ``add_config`` → ``reserve_stock``) and
+        # that reservation is *consumed* when the order is created (the cart is
+        # cleared). Decrementing here as well subtracted every unit twice
+        # (e.g. stock 5 → 4 on add → 3 on approval) while cancel/refund only
+        # ever gave one unit back.
+        if order is None or not order.items:
+            raise OrderStatusError("سفارش یافت نشد")
+
         await self._advance_to(order, OrderStatus.APPROVED, admin=admin,
                                note=note or "پرداخت تایید شد")
         order = await self.uow.orders.get_with_items(order.id)
-        # Mark payment approved and decrement stock (once).
+        # Mark payment approved.
         payment = self._get_pending_payment(order)
         if payment:
             payment.status = PaymentStatus.APPROVED
-        
-        # Bug #4/#16 - Increment discount code usage after payment approval
-        if order.discount_code:
-            discount = await self.uow.discount_codes.get_by_code(order.discount_code)
-            if discount:
-                await self.uow.discount_codes.increment_usage(discount.id)
-        
+
+        # NOTE: the coupon's usage_count is consumed once, when the order is
+        # created (see ``create_order_from_cart`` →
+        # ``DiscountCodeService.apply_discount_code``), which is the documented
+        # design. Incrementing here as well double-counted every redemption and
+        # also referenced a non-existent ``Order.discount_code`` attribute,
+        # which raised AttributeError and aborted the whole checkout.
+
         await self.uow.flush()
         return order
 

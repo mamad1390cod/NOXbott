@@ -136,6 +136,9 @@ async def cb_payment_approve(callback: CallbackQuery, uow, user: User, bot) -> N
     except ValueError as e:
         await callback.answer(str(e), show_alert=True)
         return
+    if not payment:
+        await callback.answer("پرداخت یافت نشد", show_alert=True)
+        return
     await uow.flush()
 
     await uow.commit()
@@ -157,12 +160,19 @@ async def cb_payment_approve(callback: CallbackQuery, uow, user: User, bot) -> N
 
 @router.callback_query(F.data.startswith("apay:reject:"))
 async def cb_payment_reject(callback: CallbackQuery, uow, user: User) -> None:
-    payment_id = callback.data.split(":", 2)[2]
+    parts = callback.data.split(":", 2)
+    if len(parts) < 3:
+        await callback.answer("پرداخت یافت نشد", show_alert=True)
+        return
+    payment_id = parts[2]
     ps = PaymentService(uow)
     try:
         payment = await ps.reject_payment(payment_id, user.id, reason="عدم تطابق رسید")
     except ValueError as e:
         await callback.answer(str(e), show_alert=True)
+        return
+    if not payment:
+        await callback.answer("پرداخت یافت نشد", show_alert=True)
         return
     await uow.flush()
 

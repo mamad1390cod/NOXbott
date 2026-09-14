@@ -92,7 +92,11 @@ async def add_link(message: Message, state: FSMContext, uow: UnitOfWork) -> None
 
 @router.callback_query(F.data.startswith("amem:delete:"))
 async def cb_delete(callback: CallbackQuery, uow: UnitOfWork) -> None:
-    index = int(callback.data.rsplit(":", 1)[1])
+    try:
+        index = int(callback.data.rsplit(":", 1)[1])
+    except ValueError:
+        await callback.answer("مورد نامعتبر است.", show_alert=True)
+        return
     try:
         await MandatoryMembershipService(uow).remove(index)
         await uow.commit()
@@ -106,7 +110,11 @@ async def cb_delete(callback: CallbackQuery, uow: UnitOfWork) -> None:
 async def cb_edit(
     callback: CallbackQuery, state: FSMContext, uow: UnitOfWork
 ) -> None:
-    index = int(callback.data.rsplit(":", 1)[1])
+    try:
+        index = int(callback.data.rsplit(":", 1)[1])
+    except ValueError:
+        await callback.answer("مورد نامعتبر است.", show_alert=True)
+        return
     items = await MandatoryMembershipService(uow).get_all()
     if index >= len(items):
         await callback.answer("مورد یافت نشد", show_alert=True)

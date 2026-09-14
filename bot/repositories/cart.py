@@ -27,16 +27,24 @@ class CartRepository(BaseRepository[Cart]):
         return result.scalar_one_or_none()
 
     async def get_or_create(self, user_id: str) -> Cart:
-        """Get existing cart or create new one."""
+        """Get existing cart or create new one.
+
+        The returned cart always has ``items`` eagerly loaded: a freshly created
+        cart would otherwise lazy-load its collection on first attribute access,
+        which raises ``MissingGreenlet`` in async code (and crashed the first
+        "add to cart" of every user without a cart row).
+        """
         cart = await self.get_by_user_id(user_id)
         if cart is None:
             try:
                 async with self.session.begin_nested():
-                    cart = await self.create(user_id=user_id)
+                    await self.create(user_id=user_id)
             except IntegrityError:
-                cart = await self.get_by_user_id(user_id)
-                if cart is None:
-                    raise
+                # Concurrent creation won the race — fall through to the load.
+                pass
+            cart = await self.get_by_user_id(user_id)
+            if cart is None:
+                raise RuntimeError(f"Cart for user {user_id} could not be created")
         return cart
 
     async def add_item(

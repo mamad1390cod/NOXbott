@@ -548,15 +548,6 @@ def admin_settings_keyboard() -> InlineKeyboardMarkup:
     return settings_categories_keyboard()
 
 
-def admin_discounts_keyboard() -> InlineKeyboardMarkup:
-    keyboard = [
-        [InlineKeyboardButton(text="➕ افزودن کد تخفیف", callback_data="adisc:add")],
-        [InlineKeyboardButton(text="📋 لیست کدها", callback_data="adisc:list")],
-        [back_button("admin:panel")],
-    ]
-    return InlineKeyboardMarkup(inline_keyboard=keyboard)
-
-
 def admin_configs_keyboard() -> InlineKeyboardMarkup:
     keyboard = [
         [InlineKeyboardButton(text="➕ افزودن کانفیگ", callback_data="aconf:add")],

@@ -108,7 +108,11 @@ def _registered(user: User) -> str:
 
 
 # --- Menu ---------------------------------------------------------------- #
-@router.message(F.text.lower().startswith("/account") or F.text.lower() in ("/panel", "/profile"))
+@router.message(
+    (F.text.lower().startswith("/account"))
+    | (F.text.lower() == "/panel")
+    | (F.text.lower() == "/profile")
+)
 async def cmd_account(message: Message, uow, user: User) -> None:
     await _render_menu(message, uow, user, edit=False)
 

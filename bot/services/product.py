@@ -176,7 +176,10 @@ class ProductService(BaseService):
             status=ProductStatus.INACTIVE,
         )
         await self.uow.flush()
-        return new_product
+        # Re-load with the category eager-loaded: callers render
+        # ``product.category`` directly, and a lazy load would raise
+        # ``MissingGreenlet`` inside async handlers (broke «کپی محصول»).
+        return await self.get_product_with_category(new_product.id)
 
     async def toggle_visibility(self, product_id: str) -> Product | None:
         """Toggle product visibility."""

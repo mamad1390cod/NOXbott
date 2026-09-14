@@ -5,8 +5,9 @@ from datetime import datetime, timezone
 
 from aiogram import F, Router, types
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 
+from bot.keyboards.common import back_button
 from bot.keyboards.discount_keyboard import (
     admin_discount_cancel_keyboard,
     admin_discount_confirm_delete_keyboard,
@@ -28,96 +29,43 @@ logger = logging.getLogger(__name__)
 
 ITEMS_PER_PAGE = 10
 
-
-@router.callback_query(F.data == "admin:discounts")
-async def cb_admin_discount_menu(callback: CallbackQuery, uow, user) -> None:
-    """Show admin discount code management menu."""
-    text = (
-        "🎟 <b>مدیریت کدهای تخفیف</b>\n\n"
-        "از این بخش می‌توانید کدهای تخفیف ایجاد و مدیریت کنید."
-    )
-    await safe_edit_text(callback, text, reply_markup=admin_discount_menu_keyboard())
-    await callback.answer()
-
-
-@router.callback_query(F.data == "admin:discount:menu")
-async def cb_admin_discount_menu_back(callback: CallbackQuery, state: FSMContext, uow, user) -> None:
-    """Return to discount menu (clearing state)."""
-    # Clear any active FSM state
-    await state.clear()
-    
-    text = (
-        "🎟 <b>مدیریت کدهای تخفیف</b>\n\n"
-        "از این بخش می‌توانید کدهای تخفیف ایجاد و مدیریت کنید."
-    )
-    await safe_edit_text(callback, text, reply_markup=admin_discount_menu_keyboard())
-    await callback.answer()
+# «✏️ ویرایش» field → FSM state that collects the new value.
+_EDIT_FIELD_STATES = {
+    "code": AdminDiscountCodeStates.waiting_edit_code,
+    "value": AdminDiscountCodeStates.waiting_edit_value,
+    "max_eligible": AdminDiscountCodeStates.waiting_edit_max_eligible,
+    "expiration": AdminDiscountCodeStates.waiting_edit_expiration,
+    "max_uses": AdminDiscountCodeStates.waiting_edit_max_uses,
+    "description": AdminDiscountCodeStates.waiting_edit_description,
+}
 
 
-@router.callback_query(F.data.startswith("admin:discount:list"))
-async def cb_admin_discount_list(callback: CallbackQuery, uow, user) -> None:
-    """List all discount codes with pagination."""
-    parts = callback.data.split(":")
-    page = int(parts[3]) if len(parts) > 3 else 0
-    
-    discount_service = DiscountCodeService(uow)
-    
-    total_count = await discount_service.count_discount_codes(active_only=False)
-    total_pages = (total_count + ITEMS_PER_PAGE - 1) // ITEMS_PER_PAGE
-    
-    codes = await discount_service.list_discount_codes(
-        offset=page * ITEMS_PER_PAGE,
-        limit=ITEMS_PER_PAGE,
-        active_only=False,
-    )
-    
-    if not codes:
-        text = "❌ هیچ کد تخفیفی یافت نشد."
-        await safe_edit_text(callback, text, reply_markup=admin_discount_menu_keyboard())
-        await callback.answer()
-        return
-    
-    text = f"📋 <b>لیست کدهای تخفیف</b>\n\n📊 تعداد کل: {total_count}"
-    
-    await safe_edit_text(
-        callback, text, reply_markup=admin_discount_list_keyboard(codes, page, total_pages)
-    )
-    await callback.answer()
-
-
-@router.callback_query(F.data.startswith("admin:discount:view:"))
-async def cb_admin_discount_view(callback: CallbackQuery, uow, user) -> None:
-    """View a specific discount code."""
-    code_id = callback.data.split(":", 3)[3]
-    
-    discount_service = DiscountCodeService(uow)
-    code = await discount_service.get_discount_code(code_id)
-    
-    if not code:
-        await callback.answer("کد تخفیف یافت نشد", show_alert=True)
-        return
-    
+def _discount_details_text(code) -> str:
+    """Build the discount-code detail screen text."""
     status = "✅ فعال" if code.is_active else "❌ غیرفعال"
     type_text = "درصدی" if code.discount_type == DiscountType.PERCENTAGE else "مبلغ ثابت"
-    value_text = f"{code.discount_value}%" if code.discount_type == DiscountType.PERCENTAGE else f"{format_price(code.discount_value)} تومان"
-    
+    if code.discount_type == DiscountType.PERCENTAGE:
+        value_text = f"{code.discount_value}%"
+    else:
+        value_text = f"{format_price(code.discount_value)} تومان"
+
     expiry_text = "ندارد"
     if code.expires_at:
         if code.is_expired:
             expiry_text = f"❌ منقضی شده ({code.expires_at.strftime('%Y-%m-%d %H:%M')})"
         else:
-            expiry_text = code.expires_at.strftime('%Y-%m-%d %H:%M')
-    
+            expiry_text = code.expires_at.strftime("%Y-%m-%d %H:%M")
+
     max_uses_text = "نامحدود" if code.max_uses is None else f"{code.max_uses} بار"
     remaining_text = "نامحدود" if code.remaining_uses is None else f"{code.remaining_uses} بار"
-    
+
     max_eligible_text = "ندارد"
     if code.max_eligible_amount:
         max_eligible_text = f"{format_price(code.max_eligible_amount)} تومان"
-    
+
     desc_text = code.description or "ندارد"
-    
-    text = (
+
+    return (
         f"🎟 <b>جزئیات کد تخفیف</b>\n\n"
         f"📝 کد: <code>{code.code}</code>\n"
         f"📊 وضعیت: {status}\n"
@@ -127,12 +75,100 @@ async def cb_admin_discount_view(callback: CallbackQuery, uow, user) -> None:
         f"📅 انقضا: {expiry_text}\n"
         f"🔢 حداکثر استفاده: {max_uses_text}\n"
         f"✅ استفاده شده: {code.usage_count} بار\n"
-        f"⏳ باقیمانده: {remaining_text}\n"
+        f"⏳ باقی‌مانده: {remaining_text}\n"
         f"📄 توضیحات: {desc_text}\n"
         f"📆 ایجاد شده: {code.created_at.strftime('%Y-%m-%d')}"
     )
-    
-    await safe_edit_text(callback, text, reply_markup=admin_discount_view_keyboard(code))
+
+
+async def _render_discount_menu(callback: CallbackQuery) -> None:
+    """Render the discount management menu (does not answer the callback)."""
+    text = (
+        "🎟 <b>مدیریت کدهای تخفیف</b>\n\n"
+        "از این بخش می‌توانید کدهای تخفیف ایجاد و مدیریت کنید."
+    )
+    await safe_edit_text(callback, text, reply_markup=admin_discount_menu_keyboard())
+
+
+async def _render_discount_view(callback: CallbackQuery, code) -> None:
+    """Render the detail screen of an already-loaded discount code."""
+    await safe_edit_text(
+        callback,
+        _discount_details_text(code),
+        reply_markup=admin_discount_view_keyboard(code),
+    )
+
+
+async def _render_discount_list(callback: CallbackQuery, page: int, uow) -> None:
+    """Render one page of the discount-code list (does not answer the callback)."""
+    discount_service = DiscountCodeService(uow)
+
+    total_count = await discount_service.count_discount_codes(active_only=False)
+    total_pages = (total_count + ITEMS_PER_PAGE - 1) // ITEMS_PER_PAGE
+
+    codes = await discount_service.list_discount_codes(
+        offset=page * ITEMS_PER_PAGE,
+        limit=ITEMS_PER_PAGE,
+        active_only=False,
+    )
+
+    if not codes:
+        await safe_edit_text(
+            callback,
+            "❌ هیچ کد تخفیفی یافت نشد.",
+            reply_markup=admin_discount_menu_keyboard(),
+        )
+        return
+
+    text = f"📋 <b>لیست کدهای تخفیف</b>\n\n📊 تعداد کل: {total_count}"
+
+    await safe_edit_text(
+        callback,
+        text,
+        reply_markup=admin_discount_list_keyboard(codes, page, total_pages),
+    )
+
+
+@router.callback_query(F.data == "admin:discounts")
+async def cb_admin_discount_menu(callback: CallbackQuery, uow, user) -> None:
+    """Show admin discount code management menu."""
+    await _render_discount_menu(callback)
+    await callback.answer()
+
+
+@router.callback_query(F.data == "admin:discount:menu")
+async def cb_admin_discount_menu_back(callback: CallbackQuery, state: FSMContext, uow, user) -> None:
+    """Return to discount menu (clearing state)."""
+    await state.clear()
+    await _render_discount_menu(callback)
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("admin:discount:list"))
+async def cb_admin_discount_list(callback: CallbackQuery, uow, user) -> None:
+    """List all discount codes with pagination."""
+    parts = callback.data.split(":")
+    try:
+        page = int(parts[3]) if len(parts) > 3 else 0
+    except ValueError:
+        await callback.answer("داده‌های نامعتبر", show_alert=True)
+        return
+
+    await _render_discount_list(callback, page, uow)
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("admin:discount:view:"))
+async def cb_admin_discount_view(callback: CallbackQuery, uow, user) -> None:
+    """View a specific discount code."""
+    code_id = callback.data.split(":", 3)[3]
+    discount_service = DiscountCodeService(uow)
+    code = await discount_service.get_discount_code(code_id)
+    if not code:
+        await callback.answer("کد تخفیف یافت نشد", show_alert=True)
+        return
+
+    await _render_discount_view(callback, code)
     await callback.answer()
 
 
@@ -150,10 +186,9 @@ async def cb_admin_discount_activate(callback: CallbackQuery, uow, user) -> None
     
     await uow.commit()
     await callback.answer("✅ کد تخفیف فعال شد")
-    
-    # Refresh view
-    callback.data = f"admin:discount:view:{code_id}"
-    await cb_admin_discount_view(callback, uow, user)
+
+    # Refresh the detail screen with the new status.
+    await _render_discount_view(callback, code)
 
 
 @router.callback_query(F.data.startswith("admin:discount:deactivate:"))
@@ -170,10 +205,9 @@ async def cb_admin_discount_deactivate(callback: CallbackQuery, uow, user) -> No
     
     await uow.commit()
     await callback.answer("❌ کد تخفیف غیرفعال شد")
-    
-    # Refresh view
-    callback.data = f"admin:discount:view:{code_id}"
-    await cb_admin_discount_view(callback, uow, user)
+
+    # Refresh the detail screen with the new status.
+    await _render_discount_view(callback, code)
 
 
 @router.callback_query(F.data.startswith("admin:discount:delete:"))
@@ -210,9 +244,8 @@ async def cb_admin_discount_delete_confirm(callback: CallbackQuery, uow, user) -
         if success:
             await uow.commit()
             await callback.answer("✅ کد تخفیف حذف شد")
-            # Go back to list
-            callback.data = "admin:discount:list"
-            await cb_admin_discount_list(callback, uow, user)
+            # Go back to the first page of the list
+            await _render_discount_list(callback, 0, uow)
         else:
             await callback.answer("کد تخفیف یافت نشد", show_alert=True)
     except ValueError as e:
@@ -387,8 +420,7 @@ async def cb_skip_max_eligible(callback: CallbackQuery, state: FSMContext, uow, 
     if not data.get("code") or not data.get("discount_type"):
         await callback.answer("❌ خطا: اطلاعات ناقص است", show_alert=True)
         await state.clear()
-        callback.data = "admin:discount:menu"
-        await cb_admin_discount_menu_back(callback, state, uow, user)
+        await _render_discount_menu(callback)
         return
     
     await state.update_data(max_eligible_amount=None)
@@ -447,8 +479,7 @@ async def cb_skip_expiration(callback: CallbackQuery, state: FSMContext, uow, us
     if not data.get("code") or not data.get("discount_type"):
         await callback.answer("❌ خطا: اطلاعات ناقص است", show_alert=True)
         await state.clear()
-        callback.data = "admin:discount:menu"
-        await cb_admin_discount_menu_back(callback, state, uow, user)
+        await _render_discount_menu(callback)
         return
     
     await state.update_data(expires_at=None)
@@ -498,8 +529,7 @@ async def cb_skip_max_uses(callback: CallbackQuery, state: FSMContext, uow, user
     if not data.get("code") or not data.get("discount_type"):
         await callback.answer("❌ خطا: اطلاعات ناقص است", show_alert=True)
         await state.clear()
-        callback.data = "admin:discount:menu"
-        await cb_admin_discount_menu_back(callback, state, uow, user)
+        await _render_discount_menu(callback)
         return
     
     await state.update_data(max_uses=None)
@@ -532,10 +562,11 @@ async def cb_skip_description(callback: CallbackQuery, state: FSMContext, uow, u
     
     # Validate that we have all required data
     if not data.get("code") or not data.get("discount_type") or not data.get("discount_value"):
-        await callback.answer("❌ خطا: اطلاعات ناقص است. لطفاً دوباره شروع کنید.", show_alert=True)
+        await callback.answer(
+            "❌ خطا: اطلاعات ناقص است. لطفاً دوباره شروع کنید.", show_alert=True
+        )
         await state.clear()
-        callback.data = "admin:discount:menu"
-        await cb_admin_discount_menu_back(callback, state, uow, user)
+        await _render_discount_menu(callback)
         return
     
     # Set description to None
@@ -607,6 +638,299 @@ async def _create_discount_code(message: Message, state: FSMContext, uow, user) 
         logger.exception("Failed to create discount code")
         await message.answer(f"❌ خطای سیستمی: {str(e)}")
         await state.clear()
+
+
+# ============================================================================
+# EDIT DISCOUNT CODE
+# ============================================================================
+
+def _edit_field_prompt(field: str, code) -> str:
+    """Prompt asking for the new value of one editable field."""
+    if field == "code":
+        return (
+            "📝 <b>ویرایش کد تخفیف</b>\n\n"
+            f"کد فعلی: <code>{code.code}</code>\n\n"
+            "کد جدید را وارد کنید (۳ تا ۵۰ کاراکتر):"
+        )
+
+    if field == "value":
+        if code.discount_type == DiscountType.PERCENTAGE:
+            return (
+                "🔢 <b>ویرایش مقدار تخفیف</b>\n\n"
+                f"مقدار فعلی: {code.discount_value}%\n\n"
+                "درصد جدید را وارد کنید (۱ تا ۱۰۰):"
+            )
+        return (
+            "🔢 <b>ویرایش مقدار تخفیف</b>\n\n"
+            f"مقدار فعلی: {format_price(code.discount_value)} تومان\n\n"
+            "مبلغ جدید را به تومان وارد کنید:"
+        )
+
+    if field == "max_eligible":
+        current = (
+            f"{format_price(code.max_eligible_amount)} تومان"
+            if code.max_eligible_amount
+            else "ندارد"
+        )
+        return (
+            "💰 <b>ویرایش حداکثر مبلغ مجاز</b>\n\n"
+            f"مقدار فعلی: {current}\n\n"
+            "حداکثر مبلغ مجاز جدید را به تومان وارد کنید:"
+        )
+
+    if field == "expiration":
+        current = (
+            code.expires_at.strftime("%Y-%m-%d %H:%M") if code.expires_at else "ندارد"
+        )
+        return (
+            "📅 <b>ویرایش تاریخ انقضا</b>\n\n"
+            f"مقدار فعلی: {current}\n\n"
+            "تاریخ و ساعت جدید را به فرمت زیر وارد کنید:\n"
+            "<code>YYYY-MM-DD HH:MM</code>\n\n"
+            "مثال: <code>2026-12-31 23:59</code>"
+        )
+
+    if field == "max_uses":
+        current = f"{code.max_uses} بار" if code.max_uses is not None else "نامحدود"
+        return (
+            "🔢 <b>ویرایش حداکثر تعداد استفاده</b>\n\n"
+            f"مقدار فعلی: {current}\n\n"
+            "حداکثر تعداد استفاده جدید را وارد کنید:"
+        )
+
+    if field == "description":
+        current = code.description or "ندارد"
+        return (
+            "📄 <b>ویرایش توضیحات</b>\n\n"
+            f"مقدار فعلی: {current}\n\n"
+            "توضیحات جدید را وارد کنید (حداکثر ۲۵۵ کاراکتر):"
+        )
+
+    return ""
+
+
+async def _apply_discount_edit(
+    message: Message, state: FSMContext, uow, *, field_label: str, **changes
+) -> None:
+    """Persist one edited field and show the refreshed detail screen."""
+    data = await state.get_data()
+    code_id = data.get("edit_code_id")
+
+    if not code_id:
+        await message.answer(
+            "❌ خطا: اطلاعات ویرایش یافت نشد. لطفاً دوباره از منوی کدهای تخفیف شروع کنید."
+        )
+        await state.clear()
+        return
+
+    discount_service = DiscountCodeService(uow)
+
+    try:
+        code = await discount_service.update_discount_code(code_id, **changes)
+    except ValueError as e:
+        # Keep the state so the admin can retry with a valid value.
+        await message.answer(f"❌ {e}\n\nلطفاً مقدار دیگری وارد کنید:")
+        return
+
+    await uow.commit()
+    await state.clear()
+
+    await message.answer(
+        f"✅ <b>{field_label} با موفقیت ویرایش شد</b>\n\n{_discount_details_text(code)}",
+        reply_markup=admin_discount_view_keyboard(code),
+    )
+
+
+@router.callback_query(F.data.startswith("admin:discount:edit_field:"))
+async def cb_admin_discount_edit_field(
+    callback: CallbackQuery, state: FSMContext, uow, user
+) -> None:
+    """Ask for the new value of the selected field."""
+    parts = callback.data.split(":")
+    if len(parts) < 5:
+        await callback.answer("درخواست نامعتبر", show_alert=True)
+        return
+
+    code_id, field = parts[3], parts[4]
+    field_state = _EDIT_FIELD_STATES.get(field)
+
+    if field_state is None:
+        await callback.answer("فیلد نامعتبر", show_alert=True)
+        return
+
+    discount_service = DiscountCodeService(uow)
+    code = await discount_service.get_discount_code(code_id)
+
+    if not code:
+        await callback.answer("کد تخفیف یافت نشد", show_alert=True)
+        return
+
+    await state.update_data(edit_code_id=code_id, edit_field=field)
+    await state.set_state(field_state)
+
+    await safe_edit_text(
+        callback,
+        _edit_field_prompt(field, code),
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[[back_button(f"admin:discount:edit:{code_id}")]]
+        ),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("admin:discount:edit:"))
+async def cb_admin_discount_edit(
+    callback: CallbackQuery, state: FSMContext, uow, user
+) -> None:
+    """Show the list of editable fields for a discount code."""
+    code_id = callback.data.split(":", 3)[3]
+
+    discount_service = DiscountCodeService(uow)
+    code = await discount_service.get_discount_code(code_id)
+
+    if not code:
+        await callback.answer("کد تخفیف یافت نشد", show_alert=True)
+        return
+
+    await state.clear()
+    await state.update_data(edit_code_id=code_id)
+    await state.set_state(AdminDiscountCodeStates.waiting_edit_field)
+
+    text = (
+        "✏️ <b>ویرایش کد تخفیف</b>\n\n"
+        f"📝 کد: <code>{code.code}</code>\n\n"
+        "کدام مورد را می‌خواهید ویرایش کنید؟"
+    )
+
+    await safe_edit_text(callback, text, reply_markup=admin_discount_edit_keyboard(code_id))
+    await callback.answer()
+
+
+@router.message(AdminDiscountCodeStates.waiting_edit_field)
+async def process_edit_field_choice(message: Message, state: FSMContext) -> None:
+    """Text typed on the edit menu: ask for a button press instead."""
+    data = await state.get_data()
+    code_id = data.get("edit_code_id")
+
+    if not code_id:
+        await message.answer("❌ لطفاً از منوی مدیریت کدهای تخفیف شروع کنید.")
+        return
+
+    await message.answer(
+        "❌ لطفاً یکی از گزینه‌های زیر را انتخاب کنید:",
+        reply_markup=admin_discount_edit_keyboard(code_id),
+    )
+
+
+@router.message(AdminDiscountCodeStates.waiting_edit_code)
+async def process_edit_code(message: Message, state: FSMContext, uow, user) -> None:
+    """Edit the discount code string."""
+    new_code = (message.text or "").strip().upper()
+
+    if len(new_code) < 3 or len(new_code) > 50:
+        await message.answer("❌ کد تخفیف باید بین ۳ تا ۵۰ کاراکتر باشد. لطفاً دوباره وارد کنید:")
+        return
+
+    await _apply_discount_edit(
+        message, state, uow, field_label="کد تخفیف", code=new_code
+    )
+
+
+@router.message(AdminDiscountCodeStates.waiting_edit_value)
+async def process_edit_value(message: Message, state: FSMContext, uow, user) -> None:
+    """Edit the discount value."""
+    try:
+        value = int((message.text or "").strip())
+    except ValueError:
+        await message.answer("❌ لطفاً یک عدد صحیح وارد کنید:")
+        return
+
+    if value < 1:
+        await message.answer("❌ مقدار تخفیف باید بیشتر از صفر باشد. لطفاً دوباره وارد کنید:")
+        return
+
+    await _apply_discount_edit(
+        message, state, uow, field_label="مقدار تخفیف", discount_value=value
+    )
+
+
+@router.message(AdminDiscountCodeStates.waiting_edit_max_eligible)
+async def process_edit_max_eligible(message: Message, state: FSMContext, uow, user) -> None:
+    """Edit the maximum eligible cart amount."""
+    try:
+        amount = int((message.text or "").strip())
+    except ValueError:
+        await message.answer("❌ لطفاً یک عدد صحیح وارد کنید:")
+        return
+
+    if amount < 1:
+        await message.answer("❌ مبلغ باید بیشتر از صفر باشد. لطفاً دوباره وارد کنید:")
+        return
+
+    await _apply_discount_edit(
+        message, state, uow, field_label="حداکثر مبلغ مجاز", max_eligible_amount=amount
+    )
+
+
+@router.message(AdminDiscountCodeStates.waiting_edit_expiration)
+async def process_edit_expiration(message: Message, state: FSMContext, uow, user) -> None:
+    """Edit the expiration date."""
+    date_str = (message.text or "").strip()
+
+    try:
+        expires_at = datetime.strptime(date_str, "%Y-%m-%d %H:%M").replace(
+            tzinfo=timezone.utc
+        )
+    except ValueError:
+        await message.answer(
+            "❌ فرمت تاریخ نادرست است. لطفاً به فرمت <code>YYYY-MM-DD HH:MM</code> وارد کنید:\n\n"
+            "مثال: <code>2026-12-31 23:59</code>"
+        )
+        return
+
+    if expires_at <= datetime.now(timezone.utc):
+        await message.answer("❌ تاریخ انقضا باید در آینده باشد. لطفاً دوباره وارد کنید:")
+        return
+
+    await _apply_discount_edit(
+        message, state, uow, field_label="تاریخ انقضا", expires_at=expires_at
+    )
+
+
+@router.message(AdminDiscountCodeStates.waiting_edit_max_uses)
+async def process_edit_max_uses(message: Message, state: FSMContext, uow, user) -> None:
+    """Edit the maximum number of uses."""
+    try:
+        max_uses = int((message.text or "").strip())
+    except ValueError:
+        await message.answer("❌ لطفاً یک عدد صحیح وارد کنید:")
+        return
+
+    if max_uses < 1:
+        await message.answer("❌ تعداد باید بیشتر از صفر باشد. لطفاً دوباره وارد کنید:")
+        return
+
+    await _apply_discount_edit(
+        message, state, uow, field_label="حداکثر تعداد استفاده", max_uses=max_uses
+    )
+
+
+@router.message(AdminDiscountCodeStates.waiting_edit_description)
+async def process_edit_description(message: Message, state: FSMContext, uow, user) -> None:
+    """Edit the description."""
+    description = (message.text or "").strip()
+
+    if not description:
+        await message.answer("❌ توضیحات نمی‌تواند خالی باشد. لطفاً دوباره وارد کنید:")
+        return
+
+    if len(description) > 255:
+        await message.answer("❌ توضیحات نباید بیشتر از ۲۵۵ کاراکتر باشد. لطفاً دوباره وارد کنید:")
+        return
+
+    await _apply_discount_edit(
+        message, state, uow, field_label="توضیحات", description=description
+    )
 
 
 @router.callback_query(F.data == "admin:discount:stats")

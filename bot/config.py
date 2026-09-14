@@ -131,7 +131,9 @@ class Settings(BaseSettings):
             # Ensure parent directory exists
             if not db_path.is_absolute():
                 # If relative path provided, make it absolute relative to project
-                db_path = cls._PROJECT_DIR / db_path
+                # (get_project_root() instead of the private attr: pydantic
+                #  private attributes are not readable from the class object).
+                db_path = get_project_root() / db_path
             
             db_path.parent.mkdir(parents=True, exist_ok=True)
             

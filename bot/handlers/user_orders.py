@@ -84,7 +84,11 @@ async def cb_orders_page(callback: CallbackQuery, uow, user: User) -> None:
     if len(parts) < 3:
         await callback.answer("داده‌های نامعتبر", show_alert=True)
         return
-    page = int(parts[2])
+    try:
+        page = int(parts[2])
+    except ValueError:
+        await callback.answer("داده‌های نامعتبر", show_alert=True)
+        return
     await _show_orders(callback, uow, user, page)
 
 

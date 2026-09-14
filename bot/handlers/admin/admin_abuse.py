@@ -183,7 +183,11 @@ async def cb_wl_del(callback: CallbackQuery, uow, user: User) -> None:
     if len(parts) < 3:
         await callback.answer("آیدی یافت نشد", show_alert=True)
         return
-    tg_id = int(parts[2])
+    try:
+        tg_id = int(parts[2])
+    except ValueError:
+        await callback.answer("آیدی یافت نشد", show_alert=True)
+        return
     abuse = AntiAbuseService(uow)
     await abuse.unblacklist_user(tg_id)
     # also clear whitelist flag fully - use parameterized query
