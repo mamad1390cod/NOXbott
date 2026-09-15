@@ -58,6 +58,15 @@ async def main() -> None:
     
     log_event('application_starting', level=logging.INFO)
 
+    # A backup staged from the admin panel is applied *before* the engine opens
+    # the database — swapping it under a running bot corrupts the result.
+    from bot.utils.backup import apply_pending_restore
+    try:
+        if apply_pending_restore():
+            logger.warning("Staged database backup applied at startup")
+    except Exception as exc:  # noqa: BLE001 - never block startup on a bad backup
+        logger.exception("Failed to apply staged backup: %s", exc)
+
     logger.info("Initializing database...")
     await init_db()
     log_event('database_connected', level=logging.INFO)

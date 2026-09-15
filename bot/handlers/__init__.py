@@ -125,7 +125,10 @@ def _build_admin_router() -> Router:
     _gate(admin_topup_router, [Permission.MANAGE_PAYMENTS, Permission.APPROVE_PAYMENTS])
     _gate(admin_cleanup_router, [Permission.DELETE_ORDERS, Permission.MANAGE_PAYMENTS])
     _gate(admin_membership_router, Permission.CHANGE_SETTINGS)
-    _gate(admin_backup_router, Permission.MANAGE_PAYMENTS)
+    # Backup/restore has its own permissions: the router admits either, and
+    # each handler enforces the exact one (download=BACKUP_DATABASE,
+    # restore=RESTORE_DATABASE). MANAGE_PAYMENTS used to open both doors.
+    _gate(admin_backup_router, [Permission.BACKUP_DATABASE, Permission.RESTORE_DATABASE])
     _gate(admin_custom_categories_router, Permission.MANAGE_CUSTOMS)
     _gate(admin_discounts_router, Permission.MANAGE_PRODUCTS)  # Discount codes use product permission
 

@@ -339,6 +339,8 @@ fix → one proof test per defect that **fails on the pre-fix source**.
 | — | Broadcast queue screen (pause/resume a scheduled broadcast) | feature | OPEN — awaiting decision |
 | D19 | 15 wizard handlers crashed on a photo/sticker where text was expected | MEDIUM | FIXED |
 | D20 | Financial filters: «تا» drops the last day, and product/category/admin/payment filters are inert | HIGH | OPEN — needs approval |
+| D21 | Backup targeted a hardcoded relative path; restore swapped the DB under the running bot (provably corrupting it) | **CRITICAL** | FIXED |
+| D22 | Backup/restore was gated by MANAGE_PAYMENTS — an operator could wipe the database | **CRITICAL** | FIXED |
 | — | Line-ending noise: orphans.py restored to the file's original CRLF convention | — | FIXED |
 | — | Router-gated callbacks are never answered (client spinner) | MEDIUM | OPEN — awaiting decision |
 
@@ -416,6 +418,12 @@ python3 -m pytest tests/audit/test_phase5_input_guards.py -q
 # financial filters: sanity + two proven OPEN defects (D20)
 python3 -m pytest tests/audit/test_phase5_finance.py -q
 #   → 1 passed, 2 xfailed in 6.22s
+
+# backup/restore: live snapshot, staged restore, permission split (D21, D22)
+python3 -m pytest tests/audit/test_phase5_backup.py -q
+#   → 6 passed in 8.47s
+# pre-fix sources → collection error: has_pending_restore/sqlite_file_path missing
+#   (the validated staging API did not exist)
 # pre-fix sources, tests unchanged → 6 failed (the real Telegram error is visible:
 #   "Bad Request: there is no media in the message to edit")
 
@@ -426,7 +434,7 @@ python3 -m pytest tests/audit/test_phase4_flows.py -q
 
 # full audit suite with the stricter harness semantics
 python3 -m pytest tests/audit -q
-#   → 81 passed, 2 xfailed in 103.28s   (was 75 before this batch)
+#   → 87 passed, 2 xfailed in 107.55s   (was 81 before this batch)
 
 # repository suite on a throwaway DB
 DATABASE_URL="sqlite+aiosqlite:////tmp/repo_p5.db" python3 -m pytest tests/ -q --ignore=tests/audit
@@ -563,6 +571,33 @@ Two defects proven by tests, **deliberately not fixed yet** because they change 
 2. **Product / category / admin / payment-status filters are inert.** The UI confirms «✅ فیلتر محصول اعمال شد» and the dashboard prints «📦 محصول: X», but `_paid_stmt` only honours date / `user_id` / `admin_id`: every number stays unfiltered. An admin reading a "filtered" financial report is reading the unfiltered one.
 
 Both are recorded as `xfail(strict=True)` in `tests/audit/test_phase5_finance.py` (`test_date_filter_includes_the_last_day`, `test_product_filter_actually_filters`) — they fail today, and if someone fixes the behaviour the suite will fail loudly so the marker is removed deliberately. The fix is small (parse the dates into `date_to = end-of-day`; apply product/admin/payment joins), but it changes what the numbers mean → awaiting your go-ahead.
+
+### **BUG #D21 – the backup screen read/wrote the wrong file, and a restore corrupted the database**
+**Where:** `bot/handlers/admin/admin_backup.py` (+ the unused, correct utilities in `bot/utils/backup.py`).
+
+**Three defects in one feature:**
+1. **Wrong file.** `get_db_path()` returned `Path("noxbot.db")` — relative to the *working directory* — while the application resolves its database from `DATABASE_URL` (`bot/config.py` → `<project root>/noxbot.db`). Started from another directory (or with a custom URL) the download said "❌ فایل دیتابیس یافت نشد", or captured an unrelated/stale file; the restore wrote to that same wrong path. The admin's "backup" was not the bot's database.
+2. **Restore under a running bot corrupts the result.** The handler copied the upload over the live file while the engine held open connections: those connections kept writing the *old* image's pages into the replacement. Proven in the test run — the file ends up as `database disk image is malformed` — and the handler reported «✅ بکاپ با موفقیت بازیابی شد». Leaving the old `<db>-wal`/`-shm` sidecars next to the new file did the same damage.
+3. **No validation.** Any file named `*.db` (including garbage, or a text file) was moved over the database; there was no header/integrity check and no way back except the pre-restore copy — which itself was made with `shutil.copy2` on a live database (torn snapshot).
+
+**Fix (root, reusing the utilities that already existed for this):**
+* `bot/utils/backup.py` now owns the database path (`sqlite_file_path()` resolves the engine URL), a **consistent snapshot** (`sqlite3.Connection.backup()` instead of `copy2` on a live file), validation (`validate_sqlite_database()`: SQLite magic header + `PRAGMA integrity_check`), a pre-restore snapshot, and stale `-wal`/`-shm` cleanup.
+* The admin screen uses them: the download sends a snapshot of the real database; an upload is **validated and staged** (`backups/pending_restore.db` + a JSON note of who/when) and the reply now says «✅ بکاپ معتبر است… برای اعمال، بات را ریستارت کنید». `main.py` applies the staged file **before** the engine opens the database (`apply_pending_restore()`), so the swap happens on a stopped database — no corruption, and the restart the UI always demanded is now what actually performs the restore.
+* Invalid uploads are refused with «❌ این فایل یک دیتابیس سالم نیست… دیتابیس فعلی دستنخورده باقی ماند».
+
+**Proof:** `tests/audit/test_phase5_backup.py` — the download must contain a fixture-unique marker row from the live database; a garbage upload must be refused and leave a healthy database with its rows intact; a valid upload must be *staged* (and the live database untouched); the startup applier must adopt the staged file, keep a `*.pre_restore_*` rollback and pass `integrity_check`; and applying twice must not re-apply. Pre-fix the module can't even be imported (the staging API did not exist); post-fix all six pass.
+
+### **BUG #D22 – backup/restore was gated by payment permissions (an operator could wipe the database)**
+**Where:** `bot/handlers/__init__.py::_build_admin_router()` — `_gate(admin_backup_router, Permission.MANAGE_PAYMENTS)`.
+
+**Why it is wrong:** the enum already separates the concerns (`BACKUP_DATABASE`, `RESTORE_DATABASE`) and `ROLE_DEFAULTS` assigns them to the financial manager and the developer — but the router asked for `MANAGE_PAYMENTS`, which is the *operator*'s permission. So the front-line payment approver could download the whole database (customer names, phones, emails, wallet balances) and replace it with any file they liked, while the roles designed for it could not.
+
+**Fix:** the router admits `[BACKUP_DATABASE, RESTORE_DATABASE]` and each handler enforces the exact one it needs (download → `BACKUP_DATABASE`, restore → `RESTORE_DATABASE`).
+
+**Proof:** `test_payment_permissions_cannot_touch_the_database` (an operator gets no download, no restore screen, and the database keeps its rows) and `test_backup_permissions_allow_the_right_role` (a DEVELOPER can do both) — both fail on the pre-fix source.
+
+### 📋 NOTE — a deliberate behaviour change you should know about
+Restoring is no longer instant: the (validated) upload is staged and applied at the **next start**. That is the only way to swap a SQLite file safely; the alternative was a screen that reported success while corrupting the database. Nothing else about the feature changed, and the button text already told the admin a restart was required.
 
 **Still to read in this phase:** the admin handlers themselves — `admin_topup.py`
 (top-up approval, money), `admin_orders.py`, `admin_customs.py`, `admin_tickets.py`

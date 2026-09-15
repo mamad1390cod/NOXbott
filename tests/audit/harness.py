@@ -17,6 +17,7 @@ import itertools
 import re
 import time
 from datetime import datetime, timezone
+import pathlib
 from typing import Any
 
 from aiogram import Bot, Dispatcher
@@ -28,6 +29,8 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.methods import TelegramMethod
 from aiogram.types import (
     CallbackQuery,
+    Document,
+    File,
     Chat,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
@@ -60,12 +63,21 @@ class FakeTelegramSession(BaseSession):
         # like "no buttons").
         self.message_state: dict[tuple[Any, Any], dict[str, Any]] = {}
         self.fail_next_with: dict[str, str] = {}
+        # Uploaded documents: file_id -> {"file_path", "content"} so that
+        # GetFile + stream_content (the download path) behave like Telegram.
+        self.files: dict[str, dict[str, Any]] = {}
 
     # -- BaseSession interface ------------------------------------------- #
     async def close(self) -> None:  # pragma: no cover - nothing to release
         return None
 
     async def stream_content(self, *args: Any, **kwargs: Any):  # noqa: ANN201
+        """Yield the bytes of the file the url points at (download path)."""
+        url = str(kwargs.get("url") or (args[0] if args else ""))
+        for meta in self.files.values():
+            if url.endswith(meta["file_path"]):
+                yield meta["content"]
+                return
         if False:  # pragma: no cover
             yield b""
         return
@@ -95,8 +107,32 @@ class FakeTelegramSession(BaseSession):
         if name == "GetMe":
             return self._bot_user()
 
+        if name == "GetFile":
+            fid = payload.get("file_id")
+            meta = self.files.get(fid)
+            if meta is None:
+                raise TelegramBadRequest(method=method, message="Bad Request: file not found")
+            return File(
+                file_id=fid,
+                file_unique_id=fid,
+                file_size=len(meta["content"]),
+                file_path=meta["file_path"],
+            )
+
         if name in ("SendMessage", "SendPhoto", "SendDocument", "SendVideo", "SendAnimation"):
             text = payload.get("text") or payload.get("caption") or ""
+            document_bytes = None
+            document_name = None
+            if name == "SendDocument":
+                # Read the outgoing upload *now*: the handler deletes the file
+                # right after sending, and tests assert on the bytes it sent.
+                doc = payload.get("document")
+                doc_path = getattr(doc, "path", None)
+                if doc_path is not None:
+                    candidate = pathlib.Path(str(doc_path))
+                    if candidate.exists():
+                        document_bytes = candidate.read_bytes()
+                document_name = getattr(doc, "filename", None)
             msg = Message(
                 message_id=next(self._mid),
                 date=datetime.now(timezone.utc),
@@ -119,6 +155,8 @@ class FakeTelegramSession(BaseSession):
                     "reply_markup": payload.get("reply_markup"),
                     "parse_mode": payload.get("parse_mode"),
                     "at": time.time(),
+                    "document_bytes": document_bytes,
+                    "document_name": document_name,
                 }
             )
             self.message_state[(payload.get("chat_id"), msg.message_id)] = {
@@ -399,6 +437,36 @@ class TelegramSim:
             ),
         )
         return await self._feed(update, expect_error=expect_error)
+
+    async def send_document(
+        self,
+        user_id: int,
+        file_name: str | None = "backup.db",
+        content: bytes = b"",
+        caption: str | None = None,
+    ) -> dict[str, Any]:
+        """Feed a document message (upload path: backup restore)."""
+        self.events.reset()
+        fid = f"doc_{next(self._update_id)}"
+        path = f"documents/{fid}/{file_name or 'file'}"
+        self.session.files[fid] = {"file_path": path, "content": content}
+        update = Update(
+            update_id=next(self._update_id),
+            message=Message(
+                message_id=next(self._update_id) + 200_000,
+                date=datetime.now(timezone.utc),
+                chat=self._chat(user_id),
+                from_user=self.tg_user(user_id),
+                caption=caption,
+                document=Document(
+                    file_id=fid,
+                    file_unique_id=fid,
+                    file_name=file_name,
+                    file_size=len(content),
+                ),
+            ),
+        )
+        return await self._feed(update)
 
     async def click(
         self,
