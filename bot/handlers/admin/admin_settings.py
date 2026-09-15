@@ -81,7 +81,7 @@ async def cb_category(callback: CallbackQuery) -> None:
 
 # --- View a setting ------------------------------------------------------- #
 @router.callback_query(F.data.startswith("aset:view:"))
-async def cb_view(callback: CallbackQuery, uow, user: User) -> None:
+async def cb_view(callback: CallbackQuery, uow, user: User, *, answer: bool = True) -> None:
     parts = callback.data.split(":", 2)
     if len(parts) < 3:
         await callback.answer("تنظیم ناشناخته", show_alert=True)
@@ -100,7 +100,8 @@ async def cb_view(callback: CallbackQuery, uow, user: User) -> None:
         f"📄 مقدار: {_fmt_value(spec, value)}\n"
     )
     await safe_edit_text(callback, text, reply_markup=settings_detail_keyboard(spec))
-    await callback.answer()
+    if answer:
+        await callback.answer()
 
 
 # --- Edit value (string/integer/json) ------------------------------------- #
@@ -114,6 +115,11 @@ async def cb_edit(callback: CallbackQuery, state: FSMContext) -> None:
     spec = spec_for(key)
     if not spec:
         await callback.answer("ناشناخته", show_alert=True)
+        return
+    if spec.value_type not in ("string", "integer", "json"):
+        # The keyboard offers one action per value type; a crafted payload
+        # must not write free text into a boolean or a media key.
+        await callback.answer("⚠️ این تنظیم با ویرایش متنی تغییر نمی‌کند", show_alert=True)
         return
     await state.set_data({"settings_key": key})
     await state.set_state(SettingsStates.waiting_value)
@@ -138,6 +144,12 @@ async def do_set_value(message: Message, state: FSMContext, uow, user: User) -> 
             int(value)
         except ValueError:
             await message.answer("⚠️ مقدار باید عدد باشد:")
+            return
+    if spec.value_type == "json":
+        try:
+            json.loads(value)
+        except ValueError:
+            await message.answer("⚠️ مقدار باید JSON معتبر باشد:")
             return
     await ss.set(key, value)
     await uow.flush()
@@ -165,6 +177,13 @@ async def cb_media(callback: CallbackQuery, state: FSMContext) -> None:
         await callback.answer("تنظیم ناشناخته", show_alert=True)
         return
     key = parts[2]
+    spec = spec_for(key)
+    if not spec:
+        await callback.answer("تنظیم ناشناخته", show_alert=True)
+        return
+    if spec.value_type != "media":
+        await callback.answer("⚠️ این تنظیم رسانه نیست", show_alert=True)
+        return
     await state.set_data({"settings_key": key})
     await state.set_state(SettingsStates.waiting_media)
     await callback.message.answer("🖼 تصویر را ارسال کنید:")
@@ -178,6 +197,7 @@ async def do_set_media(message: Message, state: FSMContext, uow, user: User) -> 
     spec = spec_for(key)
     if not spec:
         await state.clear()
+        await message.answer("⚠️ تنظیم مورد نظر یافت نشد. دوباره از منوی تنظیمات انتخاب کنید.")
         return
     file_id = message.photo[-1].file_id
     ss = SettingsService(uow)
@@ -207,6 +227,11 @@ async def cb_toggle(callback: CallbackQuery, uow, user: User) -> None:
     if not spec:
         await callback.answer("ناشناخته", show_alert=True)
         return
+    if spec.value_type != "boolean":
+        # A crafted toggle used to overwrite any key with "true"/"false" —
+        # e.g. the card number the payment screen shows to customers.
+        await callback.answer("⚠️ این تنظیم کلید فعال/غیرفعال نیست", show_alert=True)
+        return
     ss = SettingsService(uow)
     current = (await ss.get_bool(key, False))
     await ss.set_bool(key, not current)
@@ -220,7 +245,8 @@ async def cb_toggle(callback: CallbackQuery, uow, user: User) -> None:
 
     await uow.commit()
     await callback.answer("تغییر کرد")
-    await cb_view(callback, uow, user)
+    # The renderer must not answer the same callback a second time.
+    await cb_view(callback, uow, user, answer=False)
 
 
 @router.message(SettingsStates.waiting_media)

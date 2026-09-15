@@ -334,6 +334,8 @@ fix → one proof test per defect that **fails on the pre-fix source**.
 | D14 | Broadcast send reported success without sending; schedule prompt had no handler | **CRITICAL** | FIXED |
 | D15 | Crafted RBAC payload could assign the ALL-permissions «مالک» role | **CRITICAL** | FIXED |
 | D16 | Stale profile buttons faked success and wrote phantom audit entries | MEDIUM | FIXED |
+| D17 | Settings editor ignored the value type → any key could be overwritten | HIGH | FIXED |
+| D18 | Boolean toggle answered the same callback twice | LOW | FIXED |
 | — | Broadcast queue screen (pause/resume a scheduled broadcast) | feature | OPEN — awaiting decision |
 | — | Router-gated callbacks are never answered (client spinner) | MEDIUM | OPEN — awaiting decision |
 
@@ -397,6 +399,11 @@ python3 -m pytest tests/audit/test_phase5_broadcast.py -q
 python3 -m pytest tests/audit/test_phase5_roles.py -q
 #   → 7 passed in 9.89s
 # pre-fix admin_roles.py + rbac.py, tests unchanged → 5 failed, 2 passed
+
+# settings editor: one action per value type + single answer (D17, D18)
+python3 -m pytest tests/audit/test_phase5_settings.py -q
+#   → 7 passed in 10.82s
+# pre-fix admin_settings.py, tests unchanged → 5 failed, 2 passed
 # pre-fix sources, tests unchanged → 6 failed (the real Telegram error is visible:
 #   "Bad Request: there is no media in the message to edit")
 
@@ -407,7 +414,7 @@ python3 -m pytest tests/audit/test_phase4_flows.py -q
 
 # full audit suite with the stricter harness semantics
 python3 -m pytest tests/audit -q
-#   → 68 passed in 96.40s         (was 61 before this batch)
+#   → 75 passed in 96.25s         (was 68 before this batch)
 
 # repository suite on a throwaway DB
 DATABASE_URL="sqlite+aiosqlite:////tmp/repo_p5.db" python3 -m pytest tests/ -q --ignore=tests/audit
@@ -502,6 +509,28 @@ pass on today's code) — the defect-pinning proofs are the ones called out per 
 
 ### 📋 OPEN — router-gated callbacks are never answered
 When `IsAdmin`/`HasPermission` rejects a callback, aiogram simply finds no handler: **nothing answers the tap**, so the user's client keeps spinning (there is no trailing fallback router — only the test harness mounts a probe that records it). `test_moderator_cannot_open_the_roles_panel` documents the state (a moderator gets no edit screen, cannot grant itself `MANAGE_ADMINS`) and asserts the unhandled event. The clean fix is a last-resort router that answers "این بخش برای شما در دسترس نیست" for unmatched callbacks on both surfaces — a dispatcher-wide behaviour change, so it waits for your go-ahead.
+
+### **BUG #D17 – the settings editor ignored the value type: any key could be overwritten**
+**Where:** `bot/handlers/admin/admin_settings.py` — `cb_toggle`, `cb_edit`, `cb_media` (+ the two wizard states).
+
+**Why it is wrong:** the detail keyboard picks its action from `SettingSpec.value_type` (text → ✏️ ویرایش, media → 🖼 ارسال تصویر, boolean → 🔄 تغییر), but the three handlers never re-checked that type — they trusted the button. So a crafted payload could drive a *different* editor at any registered key:
+* `aset:toggle:card_number` → `set_bool` wrote **"false"** over the card number the whole payment screen and every customer shows;
+* `aset:edit:<boolean>` → free text into a feature toggle;
+* `aset:media:<text key>` → a Telegram `file_id` stored as a text value (and for an unknown key the flow silently swallowed the admin's photo, because `cb_media` never validated the key at all);
+* `aset:edit:<json>` accepted broken JSON (integer keys were validated, json keys were not).
+
+**Fix:** each handler now validates the key *and* the action against the registry (`spec.value_type`), refuses with a specific alert and writes nothing; `do_set_value` validates JSON the same way it already validated integers; a stale/unknown media state tells the admin instead of dropping the photo silently.
+
+**Proof:** `tests/audit/test_phase5_settings.py::test_toggle_cannot_overwrite_a_text_setting` (asserts the fixture-unique card number survives), `::test_edit_cannot_write_into_a_boolean_setting`, `::test_media_upload_refuses_a_text_setting`, `::test_media_upload_refuses_an_unknown_key` — all fail on the pre-fix source; `::test_the_legit_edit_flow_still_works` and `::test_boolean_toggle_works_and_answers_once` guard the real flows.
+
+### **BUG #D18 – the boolean toggle answered the same callback twice**
+**Where:** `bot/handlers/admin/admin_settings.py::cb_toggle`.
+
+**Why it is wrong:** the handler ended with `callback.answer("تغییر کرد")` and then called `cb_view(...)`, which answers again. Telegram accepts exactly one answer per callback — the second call fails with "query is too old… or query ID is invalid", so every toggle logged a Telegram error (invisible to the admin, noise in production logs and to any error alerting).
+
+**Fix:** `cb_view` gained an already-answered mode (`answer=False`); the toggle answers once.
+
+**Proof:** `test_boolean_toggle_works_and_answers_once` counts the `AnswerCallbackQuery` calls of the single tap (2 pre-fix, 1 post-fix) and also asserts the value flipped, the audit entry was written and the fresh screen shows the new state.
 
 **Still to read in this phase:** the admin handlers themselves — `admin_topup.py`
 (top-up approval, money), `admin_orders.py`, `admin_customs.py`, `admin_tickets.py`
