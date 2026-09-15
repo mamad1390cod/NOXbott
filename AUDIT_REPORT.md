@@ -316,6 +316,77 @@ owner, which is why payment logic was touched at all.
 ### **O3 – Hygiene backlog: 19 pre-existing ruff findings (`E9`/`F`/`B`)**
 Measured on the changed files: **baseline HEAD = 20, after Phase 4 = 19** — i.e. **zero introduced**, one removed. They are 18 auto-fixable unused imports/assignments (`F401`/`F841`) plus one hidden fix; sweeping them is a separate, repo-wide decision, not a Phase-4 change.
 
+---
+
+# 🧪 PHASE 5 — admin flows (in progress)
+
+Scope: the admin surface (`bot/handlers/admin/*`, ~8 200 lines) plus the shared
+editing helpers both surfaces depend on. Same method as Phase 4: read → root
+fix → one proof test per defect that **fails on the pre-fix source**.
+
+## 🟠 HIGH
+
+### **BUG #D9 – a message's type cannot be changed: banner screens never rendered**
+**Where:** every screen that shows a photo — `products.py`, `configs.py`, `customs.py` (customer) and `admin_payments.py` (receipt review) — through `bot/utils/editing.py`.
+
+**Symptom:** tapping a product **that has a banner image** did *nothing*: the tap was answered, the log stayed clean, and the product list stayed on screen. Same for configs, customs and the admin payment review opened from its (text) list. The item could not be opened at all.
+
+**Root cause:** Telegram refuses `editMessageMedia` on a message that is not a media message ("Bad Request: there is no media in the message to edit") and refuses `editMessageText` on a media message ("there is no text in the message to edit"). The screens used "edit in place" navigation, so a text list could never become a photo detail and vice versa. `safe_edit_media` (Phase 4) caught the error and returned `False` — which stopped the *crash* but also stopped the *render*: the helper told the handler "fine", the handler answered the tap, and the user saw the old screen.
+
+**Fix — one root fix in `bot/utils/editing.py`:**
+* `message_has_media()` tells the two message kinds apart from the callback's own message;
+* when the target content cannot fit the current message type, the screen is **replaced**: the new message is sent first, the old one deleted afterwards (best-effort), so a failed delete still leaves a usable screen;
+* `safe_edit_text`, `safe_edit_caption` and `safe_edit_media` all use it, so *every* screen — customer and admin — switches type correctly;
+* the specific BadRequest texts are still handled defensively for messages the bot did not send.
+
+**Proof:** `tests/audit/test_phase5_admin.py::test_banner_reached_from_a_text_list_renders`, `::test_text_list_rendered_again_after_a_banner`, `::test_admin_payment_detail_with_receipt_renders` — and the Phase-4 banner test, strengthened into two passes (render, then identical re-render). All fail on the pre-fix sources with the real Telegram error in the log.
+
+### **BUG #D10 – the same "silent abort" class in the admin surface (4 raw edits)**
+**Where:** `admin_backup.py:35` (backup menu), `admin_backup.py:89` (upload instructions), `admin_orders.py:642` (post-refund refresh), `admin_payments.py:142` (receipt review).
+
+**Symptom / root cause:** identical to **#D1** — a raw `edit_text`/`edit_media` that Telegram answers with "message is not modified" is swallowed by `UserContextMiddleware`, so the rest of the handler never runs: the admin's tap stays unanswered and the button spins. Re-opening the backup menu or the upload screen (their buttons stay on the keyboard) reproduced it on every second tap.
+
+**Fix:** all four sites use the `safe_edit_*` family; a dead assignment (`refunded_order`) in the refund handler was removed at the same time.
+
+**Proof:** `test_backup_menu_rerender_survives`, `test_backup_upload_screen_tapped_twice_survives`, `test_admin_payment_detail_rerender_survives` — all three inject Telegram's exact error (`fail_edit_not_modified`) and assert the tap is still answered. All fail on the pre-fix sources.
+
+## 📊 Test-infrastructure upgrades (this phase)
+
+1. **Telegram's edit rules are now modelled** (`tests/audit/harness.py`): editing *text* into a media message, *media* into a text message, or a *caption* into a text message raises exactly what Telegram raises. Without this the fake session happily "edited" anything, which is why this whole bug class was invisible.
+2. **The callback carries a faithful message**: `click()` now hands the handler the message the button really sits on (photo + caption for a banner screen, text otherwise), so the app can tell the two cases apart — as it must in production.
+3. Message state tracks media-ness, and `DeleteMessage` clears it (needed for the replace path).
+
+Thank you — the crawl test and every existing suite still pass with the stricter semantics (`tests/audit` → 41 passed).
+
+### ✅ Phase 5 verification appendix (so far)
+
+```bash
+# phase-5 proof tests (admin surface + message-type switching)
+python3 -m pytest tests/audit/test_phase5_admin.py -q
+#   → 6 passed in 8.59s
+# pre-fix sources, tests unchanged → 6 failed (the real Telegram error is visible:
+#   "Bad Request: there is no media in the message to edit")
+
+# the Phase-4 banner test, now two passes (render, then identical re-render)
+python3 -m pytest tests/audit/test_phase4_flows.py -q
+#   → 6 passed in 8.64s
+# pre-fix editing.py → 1 failed (the banner never renders)
+
+# full audit suite with the stricter harness semantics
+python3 -m pytest tests/audit -q
+#   → 41 passed in 62.53s         (was 35 before this batch)
+
+# repository suite on a throwaway DB
+DATABASE_URL="sqlite+aiosqlite:////tmp/repo_p5.db" python3 -m pytest tests/ -q --ignore=tests/audit
+#   → 47 passed, 3 failed — unchanged (the same three pre-existing failures)
+```
+
+**Still to read in this phase:** the admin handlers themselves — `admin_topup.py`
+(top-up approval, money), `admin_orders.py`, `admin_customs.py`, `admin_tickets.py`
+and the rest of `admin/*`, including the lazy-relationship class that produced
+**#D8** (a candidate pattern: `admin_topup.py:186`, `admin_tickets.py:139/184`,
+`admin_customs.py:400/432/554`, `admin_orders.py:531-557` all touch `.user`).
+
 ## 📊 Test-infrastructure upgrades that make this phase provable
 
 A test that does not model Telegram's real behaviour cannot see this class of bug, so the harness was corrected first:

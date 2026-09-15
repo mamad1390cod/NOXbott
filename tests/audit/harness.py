@@ -124,14 +124,67 @@ class FakeTelegramSession(BaseSession):
             self.message_state[(payload.get("chat_id"), msg.message_id)] = {
                 "text": text,
                 "reply_markup": payload.get("reply_markup"),
+                "has_media": name != "SendMessage",
             }
             return msg
+
+        if name == "EditMessageMedia":
+            mid = payload.get("message_id") or 0
+            chat_id = payload.get("chat_id")
+            previous = self.message_state.get((chat_id, mid))
+            # Telegram refuses to turn a *text* message into a media message.
+            if previous is not None and not previous.get("has_media"):
+                raise TelegramBadRequest(
+                    method=method,
+                    message="Bad Request: there is no media in the message to edit",
+                )
+            media = payload.get("media") or {}
+            caption = media.get("caption") if isinstance(media, dict) else None
+            effective_markup = payload.get("reply_markup", (previous or {}).get("reply_markup"))
+            self.sent.append(
+                {
+                    "kind": "EditMessageMedia",
+                    "chat_id": chat_id,
+                    "message_id": mid,
+                    "text": caption or "",
+                    "reply_markup": effective_markup,
+                    "parse_mode": payload.get("parse_mode"),
+                    "at": time.time(),
+                }
+            )
+            self.message_state[(chat_id, mid)] = {
+                "text": caption or "",
+                "reply_markup": effective_markup,
+                "has_media": True,
+            }
+            return Message(
+                message_id=int(mid or 1),
+                date=datetime.now(timezone.utc),
+                chat=self._chat(chat_id if chat_id is not None else 0),
+                from_user=self._bot_user(),
+                caption=caption,
+                photo=[PhotoSize(file_id="bot_photo", file_unique_id="u", width=1, height=1)],
+            )
 
         if name in ("EditMessageText", "EditMessageCaption"):
             mid = payload.get("message_id") or 0
             chat_id = payload.get("chat_id")
             text = payload.get("text") or payload.get("caption") or ""
             previous = self.message_state.get((chat_id, mid), {})
+            if previous:
+                has_media = bool(previous.get("has_media"))
+                # Telegram refuses to edit text into a media message (and a
+                # caption into a text message) — the handler must handle it.
+                if name == "EditMessageText" and has_media:
+                    raise TelegramBadRequest(
+                        method=method,
+                        message="Bad Request: there is no text in the message to edit",
+                    )
+                if name == "EditMessageCaption" and not has_media:
+                    raise TelegramBadRequest(
+                        method=method,
+                        message="Bad Request: there is no caption in the message to edit",
+                    )
             # Telegram semantics: an edit without reply_markup keeps the keyboard.
             effective_markup = payload.get("reply_markup", previous.get("reply_markup"))
             self.sent.append(
@@ -148,6 +201,7 @@ class FakeTelegramSession(BaseSession):
             self.message_state[(chat_id, mid)] = {
                 "text": text,
                 "reply_markup": effective_markup,
+                "has_media": bool(previous.get("has_media")),
             }
             return Message(
                 message_id=int(mid or 1),
@@ -170,6 +224,10 @@ class FakeTelegramSession(BaseSession):
                 chat=self._chat(payload.get("chat_id", 0)),
                 from_user=self._bot_user(),
             )
+
+        if name == "DeleteMessage":
+            self.message_state.pop((payload.get("chat_id"), payload.get("message_id")), None)
+            return True
 
         if name == "SendChatAction":
             return True
@@ -356,6 +414,13 @@ class TelegramSim:
         self.events.reset()
         cid = chat_id if chat_id is not None else user_id
         mid = message_id if message_id is not None else self._last_message_id(cid) or 1
+        # The callback carries the *real* message the button sits on, so the
+        # handler can inspect it (``callback.message.photo``). Mirror the tracked
+        # state: a banner screen must be handed to the handler as a photo message,
+        # otherwise the app cannot tell the two cases apart.
+        state = self.session.message_state.get((cid, mid))
+        has_media = bool(state and state.get("has_media"))
+        body = text if text is not None else (state or {}).get("text") or "screen"
         update = Update(
             update_id=next(self._update_id),
             callback_query=CallbackQuery(
@@ -368,7 +433,13 @@ class TelegramSim:
                     date=datetime.now(timezone.utc),
                     chat=self._chat(cid),
                     from_user=self.bot_user(),
-                    text=text if text is not None else "screen",
+                    text=None if has_media else body,
+                    caption=body if has_media else None,
+                    photo=(
+                        [PhotoSize(file_id="bot_photo", file_unique_id="u", width=1, height=1)]
+                        if has_media
+                        else None
+                    ),
                     reply_markup=InlineKeyboardMarkup(
                         inline_keyboard=[[InlineKeyboardButton(text="x", callback_data=callback_data)]]
                     ),

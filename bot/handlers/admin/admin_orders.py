@@ -629,7 +629,9 @@ async def cb_aorder_refund(callback: CallbackQuery, uow, user: User) -> None:
     try:
         from bot.services.refund import RefundService
         refund_service = RefundService(uow)
-        refunded_order = await refund_service.refund_order(order, user, reason="بازگشت وجه توسط ادمین")
+        # The refunded order is re-fetched below with eager-loaded relations
+        # (the detail keyboard and label must not trigger lazy IO).
+        await refund_service.refund_order(order, user, reason="بازگشت وجه توسط ادمین")
         await uow.commit()
         
         await callback.answer("✅ بازگشت وجه با موفقیت انجام شد", show_alert=True)
@@ -639,12 +641,13 @@ async def cb_aorder_refund(callback: CallbackQuery, uow, user: User) -> None:
         os = OrderService(uow)
         refreshed_order = await os.get_order(order.id)
         
-        await callback.message.edit_text(
+        await safe_edit_text(
+            callback,
             f"✅ <b>بازگشت وجه انجام شد</b>\n\n"
             f"سفارش: {refreshed_order.order_number}\n"
             f"مبلغ: {refreshed_order.final_amount:,} تومان\n"
             f"وضعیت: {refreshed_order.status_label}",
-            reply_markup=admin_order_detail_keyboard(refreshed_order)
+            reply_markup=admin_order_detail_keyboard(refreshed_order),
         )
         
     except Exception as e:

@@ -16,7 +16,7 @@ from bot.services.order import OrderService
 from bot.services.payment import PaymentService
 from bot.texts import PAYMENT_APPROVED, PAYMENT_REJECTED
 from bot.utils.format import format_price
-from bot.utils.editing import safe_edit_text
+from bot.utils.editing import safe_edit_media, safe_edit_text
 
 router = Router(name="admin_payments")
 logger = logging.getLogger(__name__)
@@ -139,7 +139,8 @@ async def cb_payment_view(callback: CallbackQuery, uow, user: User) -> None:
     )
     kb = payment_review_keyboard(payment_id)
     if payment.receipt_url:
-        await callback.message.edit_media(
+        await safe_edit_media(
+            callback,
             types.InputMediaPhoto(media=payment.receipt_url, caption=text),
             reply_markup=kb,
         )

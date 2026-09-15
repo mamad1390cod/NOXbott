@@ -84,6 +84,7 @@ async def test_rerender_of_identical_banner_screens_survives(sim):
             price=10_000,
             stock=3,
             category_id=cat.id,
+            title="BANNER-PRODUCT",
             image_url="https://example.com/p.jpg",
         )
         config = await make_config(
@@ -94,7 +95,10 @@ async def test_rerender_of_identical_banner_screens_survives(sim):
         )
         custom_cat = await make_custom_category(session)
         custom = await make_custom(
-            session, category_id=custom_cat.id, banner_url="https://example.com/cu.jpg"
+            session,
+            category_id=custom_cat.id,
+            title="BANNER-CUSTOM",
+            banner_url="https://example.com/cu.jpg",
         )
         await session.commit()
         ids = {
@@ -108,15 +112,36 @@ async def test_rerender_of_identical_banner_screens_survives(sim):
     driver = ShopDriver(sim, ids["tg"])
     await driver.start()
 
+    entries = (
+        (f"prod_sel:{ids['product']}", "BANNER-PRODUCT"),
+        (f"config_sel:{ids['config']}", "قیمت"),
+        (f"custom_sel:{ids['custom']}", "BANNER-CUSTOM"),
+    )
+
+    # Pass 1 — no fault injection: the banner screen must actually render.
+    # A text list cannot be *edited* into a media message, so an "edit only"
+    # implementation left the previous screen on display.
+    rendered: dict[str, dict] = {}
+    for callback, marker in entries:
+        res = await sim.click(callback, ids["tg"])
+        assert res["ok"], f"{callback} crashed: {res['error']!r}"
+        screen = sim.last_screen(ids["tg"])
+        assert screen is not None, f"{callback}: nothing was rendered"
+        assert marker in (screen["text"] or ""), (
+            f"{callback}: the banner screen never rendered: {(screen['text'] or '')[:60]!r}"
+        )
+        rendered[callback] = screen
+
+    # Pass 2 — Telegram answers "message is not modified" on an identical
+    # re-render; UserContextMiddleware swallows it, so the handler must still
+    # reach callback.answer() instead of aborting on the spot.
     sim.session.fail_edit_not_modified = True
     try:
-        for callback in (
-            f"prod_sel:{ids['product']}",
-            f"config_sel:{ids['config']}",
-            f"custom_sel:{ids['custom']}",
-        ):
-            res = await sim.click(callback, ids["tg"])
-            assert res["ok"], f"{callback} crashed on a banner re-render: {res['error']!r}"
+        for callback, _marker in entries:
+            res = await sim.click(
+                callback, ids["tg"], message_id=rendered[callback]["message_id"]
+            )
+            assert res["ok"], f"{callback} crashed on a re-render: {res['error']!r}"
             answered = [n for n, _ in res["calls"] if n == "AnswerCallbackQuery"]
             assert answered, f"{callback}: handler aborted before answering the tap"
     finally:

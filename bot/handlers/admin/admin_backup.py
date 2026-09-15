@@ -11,6 +11,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message, FSInputFile
 
 from bot.keyboards.common import back_button, single_button_kb
+from bot.utils.editing import safe_edit_text
 from bot.models.user import User
 from bot.states import AdminBackupStates
 
@@ -32,10 +33,11 @@ async def cb_admin_backup(callback: CallbackQuery) -> None:
         [types.InlineKeyboardButton(text="📤 آپلود بکاپ", callback_data="abackup:upload")],
         [back_button("admin:panel")],
     ])
-    await callback.message.edit_text(
+    await safe_edit_text(
+        callback,
         "💾 <b>مدیریت بکاپ دیتابیس</b>\n\n"
         "یک گزینه را انتخاب کنید:",
-        reply_markup=keyboard
+        reply_markup=keyboard,
     )
     await callback.answer()
 
@@ -86,12 +88,13 @@ async def cb_backup_download(callback: CallbackQuery, user: User) -> None:
 async def cb_backup_upload(callback: CallbackQuery, state: FSMContext) -> None:
     """Start backup upload process."""
     await state.set_state(AdminBackupStates.waiting_backup_file)
-    await callback.message.edit_text(
+    await safe_edit_text(
+        callback,
         "📤 <b>آپلود بکاپ</b>\n\n"
         "فایل بکاپ دیتابیس (.db) را ارسال کنید:\n\n"
         "⚠️ <b>هشدار:</b> این عملیات دیتابیس فعلی را با فایل آپلود شده جایگزین می‌کند.\n"
         "تمام داده‌های فعلی از بین خواهد رفت!",
-        reply_markup=single_button_kb(back_button("admin:backup"))
+        reply_markup=single_button_kb(back_button("admin:backup")),
     )
     await callback.answer()
 
