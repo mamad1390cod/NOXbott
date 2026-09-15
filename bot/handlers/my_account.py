@@ -138,7 +138,9 @@ async def _render_menu(event, uow, user: User, edit: bool = True) -> None:
         "انتخاب بخش:"
     )
     if edit:
-        await event.message.edit_text(text, reply_markup=dashboard_menu_keyboard())
+        # safe_edit_text: re-opening «حساب من» from its own sub-screens
+        # renders identical content and must not raise.
+        await safe_edit_text(event, text, reply_markup=dashboard_menu_keyboard())
         if hasattr(event, "answer"):
             await event.answer()
     else:
@@ -435,7 +437,12 @@ async def wallet_placeholder(callback: CallbackQuery, uow, user: User) -> None:
     lines = [f"👛 <b>کیف پول</b>\n\n💰 مانده: <b>{format_price(user.wallet_balance)} تومان</b>\n"
             f"🎖 امتیاز: {user.reward_points}\n"]
     for t in ledger:
-        sign = '+' if t.type.value in ('deposit','reward','refund','topup','admin_credit') else '-'
+        # The ledger stores signed amounts (debits negative, credits positive —
+        # see WalletPaymentService.deduct_wallet / RefundService), so the amount
+        # itself is the authoritative sign. Deriving it from a hard-coded list of
+        # transaction types silently mislabels any type missing from that list
+        # (e.g. TransactionType.ADJUSTMENT).
+        sign = '+' if t.amount >= 0 else '-'
         ts = t.created_at.strftime('%m-%d %H:%M') if t.created_at else '?'
         lines.append(f"• {ts} {sign}{format_price(abs(t.amount))} {t.type.value}")
     kb = types.InlineKeyboardMarkup(inline_keyboard=[

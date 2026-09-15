@@ -29,14 +29,22 @@ def ticket_categories_keyboard(categories: Sequence) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
 
-def ticket_detail_keyboard(ticket_id: str, is_admin: bool = False) -> InlineKeyboardMarkup:
-    """Build keyboard for a single ticket."""
-    keyboard = [
-        [
-            InlineKeyboardButton(text="✍️ پاسخ", callback_data=f"ticket:reply:{ticket_id}"),
-            InlineKeyboardButton(text="✅ تکمیل شد", callback_data=f"ticket:close:{ticket_id}"),
-        ]
-    ]
+def ticket_detail_keyboard(
+    ticket_id: str, is_admin: bool = False, closed: bool = False
+) -> InlineKeyboardMarkup:
+    """Build keyboard for a single ticket.
+
+    ``closed`` drops the reply/close row: the user-side handlers reject
+    replying to a closed ticket, so offering the button is misleading.
+    """
+    keyboard = []
+    if not closed:
+        keyboard.append(
+            [
+                InlineKeyboardButton(text="✍️ پاسخ", callback_data=f"ticket:reply:{ticket_id}"),
+                InlineKeyboardButton(text="✅ تکمیل شد", callback_data=f"ticket:close:{ticket_id}"),
+            ]
+        )
     if is_admin:
         keyboard.append(
             [InlineKeyboardButton(text="🗑 حذف", callback_data=f"ticket:admin_del:{ticket_id}")]

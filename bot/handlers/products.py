@@ -13,7 +13,7 @@ from bot.services.product import ProductService
 from bot.states import ProductStates
 from bot.texts import CART_ADDED
 from bot.utils.format import format_price
-from bot.utils.editing import safe_edit_text
+from bot.utils.editing import safe_edit_media, safe_edit_text
 from bot.models.user import User
 
 router = Router(name="products")
@@ -88,11 +88,9 @@ async def cb_product_detail(
     kb = types.InlineKeyboardMarkup(inline_keyboard=keyboard)
 
     if product.image_url:
-        await callback.message.edit_media(
-            types.InputMediaPhoto(
-                media=product.image_url,
-                caption=text,
-            ),
+        await safe_edit_media(
+            callback,
+            types.InputMediaPhoto(media=product.image_url, caption=text),
             reply_markup=kb,
         )
     else:

@@ -1,4 +1,6 @@
-# 🧪 NOXbott — Phase 2/3 Audit Report (handlers, FSM & callback wiring)
+# 🧪 NOXbott — Audit Report
+
+## Phase 2/3 — handlers, FSM & callback wiring
 
 **Date:** 2026-09-14
 **Scope:** end-to-end UI audit of every callback/message handler (real dispatcher, real `UnitOfWork`), FSM/navigation middlewares, discount-management panel, purchase flows, admin wizards.
@@ -202,3 +204,137 @@ DATABASE_URL="sqlite+aiosqlite:////tmp/repo_tests.db" … python3 -m pytest test
 **Data-safety note:** an early repository-suite run in this session was started with `DATABASE_URL` pointing at the bundled `noxbot.db`. Row counts and recorded aggregates were re-checked immediately afterwards and are unchanged (orders 8 — 4 REFUNDED/4 CANCELLED; payments 8; transactions 27 with identical per-type sums), and every later run used a throwaway database. No production data was modified.
 
 **Still open (next phases):** remaining handler reads (`admin_orders.py`, `topup.py`, `custom_cart.py`, `my_account.py`, remaining `admin/*`), ruff scope decision (231 pre-existing findings in `admin_discounts.py` alone), and the C1/C2/C3 items above.
+
+
+---
+
+# 🧪 PHASE 4 — customer flows (deep read, root fixes, proof tests)
+
+Scope: every **customer-facing** handler was read end-to-end and checked against the
+running dispatcher (`menu`, `my_account`, `topup`, `cart`, `payments`, `checkout`,
+`user_orders`, `custom_cart`, `customs`, `configs`, `products`, `customer_info`,
+`support`, `notify_prefs`). Fixes are root fixes; each one has a test that **fails
+on the pre-fix source** (proof runs in the appendix).
+
+## 🔴 CRITICAL / 🟠 HIGH
+
+### **BUG #D1 – Raw `edit_text`/`edit_media` + swallowed "message is not modified" = silent handler abort**
+**Where:** `bot/handlers/menu.py` (3 sites), `bot/handlers/my_account.py` (`_render_menu`), `bot/handlers/products.py`, `bot/handlers/configs.py`, `bot/handlers/customs.py` (banner screens), `bot/middlewares/mandatory_membership.py` (gate).
+
+**Symptom:** tapping a button a second time (or navigating back to the screen you are already on) left the button **spinning forever** — no reply, no error — while the log stayed clean.
+
+**Root cause (two halves, both required):**
+1. `safe_edit_*` helpers existed, but these paths still called the raw `callback.message.edit_text/edit_media`. Telegram rejects an edit whose text is identical to the current message with `BadRequest: message is not modified`.
+2. `bot/middlewares/user_context.py:65-79` catches exactly that `TelegramBadRequest` and **returns `None`** (a deliberate anti-noise guard). The exception therefore never reaches the dispatcher, and — because the aborted coroutine is gone — **the rest of the handler never executes**: the trailing `await callback.answer()` is skipped, which is why the tap is never acknowledged.
+
+So the defect is not "a raised exception" but a *silently truncated handler*. It is invisible in logs and reproducible only by tapping twice.
+
+**Fix:** `safe_edit_media()` added to `bot/utils/editing.py` (mirrors `safe_edit_text`/`safe_edit_caption`, returns `bool`), and every customer-facing screen now edits through the `safe_edit_*` family, which detects "not modified" and keeps the handler alive so the tap is answered.
+
+**Proof:** `test_rerender_of_identical_screen_survives`, `test_rerender_of_identical_banner_screens_survives` — both drive the real dispatcher with `sim.session.fail_edit_not_modified = True` (as Telegram does) and assert an `AnswerCallbackQuery` is emitted. Both fail on the pre-fix sources.
+
+## 🟡 MEDIUM
+
+### **BUG #D2 – Dead button after the first-purchase info wizard**
+**Where:** `bot/handlers/customer_info.py:119` emitted `callback_data="cart:view"`; no handler in the codebase filters it (dead payload → the tap falls through to the dispatcher's unhandled-callback probe and the button spins).
+**Fix:** emit the live `menu:cart` (same destination as every other cart entry point).
+**Proof:** `test_first_purchase_cart_button_is_live`.
+
+### **BUG #D3 – `OrderService.refund_order` re-implemented the refund (and skipped the wallet credit)**
+**Where:** `bot/services/order.py` carried its own refund body next to `bot/services/refund.py`.
+**Impact:** a second, divergent implementation of money movement — the customer's wallet was not credited through the canonical path, so refunds could leave the balance and the ledger inconsistent.
+**Fix:** `OrderService.refund_order` now **delegates** to `RefundService.refund_order` (single implementation, single audit trail).
+**Proof:** `test_refund_credits_customer_wallet` — wallet 200 000 → 150 000 after a 50 000 wallet purchase → **200 000** again after the refund; the test reads the persisted balance, not the return value.
+
+### **BUG #D4 – Closing a ticket left a stale screen with now-dead actions**
+**Where:** `bot/handlers/support.py` (`cb_ticket_close`) + `bot/keyboards/ticket.py` (`ticket_detail_keyboard`).
+**Symptom:** after «✅ تکمیل شد» the user still saw the ticket rendered as open with «✍️ پاسخ» / «✅ تکمیل شد» buttons; «پاسخ» is explicitly rejected for closed tickets, so the visible buttons no longer did anything useful. The handler also fired a second edit carrying only `"✅ تیکت بسته شد."`, which **overwrote the detail screen** and — because it passed no `reply_markup` — left the old keyboard attached (Telegram keeps the previous keyboard when an edit omits one).
+**Fix:** detail rendering extracted to one helper (`_ticket_detail_text`), `ticket_detail_keyboard(..., closed=...)` drops the reply/close row for closed tickets, `cb_ticket_close` refreshes the screen with the closed state, and the contradictory second edit was removed (the tap still gets its toast).
+**Proof:** `test_ticket_close_refreshes_and_hides_actions` — asserts the **effective message state** (text says «بسته», neither `ticket:reply:` nor `ticket:close:` is offered). Fails on the pre-fix source.
+
+## 🟢 LOW
+
+### **BUG #D5 – Wallet ledger signed entries from a hard-coded type list**
+**Where:** `bot/handlers/my_account.py:440` — `sign = '+' if t.type.value in ('deposit','reward','refund','topup','admin_credit') else '-'`.
+**Why it is wrong:** every ledger writer stores **signed** amounts (debits negative — `WalletPaymentService.deduct_wallet`, `RefundService`, `ADMIN_DEBIT`; credits positive), so the amount is already the authoritative sign. The list is a duplicate of that information and silently mislabels any type missing from it — `TransactionType.ADJUSTMENT` (a legitimate credit) renders with a minus, and every type added later inherits the bug.
+**Fix:** derive the sign from the amount (`'+' if t.amount >= 0 else '-'`), keeping `abs()` for the display.
+**Proof:** `test_wallet_ledger_signs_credits_from_amount` — an `ADJUSTMENT` credit of 25 000 renders `+۲۵,۰۰۰`, a `SPEND` of 10 000 renders `-۱۰,۰۰۰`. Fails on the pre-fix source and passes after (verified in isolation: reverting only `my_account.py` fails exactly this test).
+
+### **BUG #D6 – Dead code in the custom-registration flow**
+`bot/handlers/custom_cart.py` contained a no-op accumulation (`total += 0`) in the price summary → removed (no behaviour change).
+
+## ⚪ NOT-A-BUG (checked, documented to prevent re-litigation)
+
+### **B3 – "Cancelling an order leaves a stale screen"**
+`bot/handlers/user_orders.py:141-142` already re-renders via `safe_edit_text("سفارش لغو شد.")` plus a home button. A patch was written, **verified unnecessary and reverted**; the file is byte-identical to the baseline commit.
+
+### **B4 – `notify_prefs.py` toggles**
+`bot/handlers/notify_prefs.py` answers each toggle with an alert and never edits the message, so the D1 class cannot trigger there. Read, no change.
+
+## 📋 REPORT-ONLY / RESIDUAL RISKS (not changed)
+
+### **O1 – 🔺 `pay:submit:<order_id>` has no producer: the card-payment-for-order flow is unreachable (needs your decision)**
+`bot/handlers/payments.py:159` implements receipt submission for an order (creates the `CARD` payment, sets `PaymentStates.waiting_receipt`), and **both** follow-up halves exist (`@router.message(PaymentStates.waiting_receipt, F.photo)` at line 205 and the text fallback at line 292). But a full census of every emitted callback payload (170 exact filters, 162 prefix filters, 41 helper-emitted literals) finds **no button anywhere that emits `pay:submit:<order_id>`**:
+* `insufficient_balance_keyboard` (`bot/keyboards/cart_keyboard.py:99`) offers only «💰 شارژ حساب» (`tu:menu`) and «🔙 بازگشت» (`menu:cart`);
+* `wallet_checkout_keyboard` offers only `checkout:confirm` + `menu:cart`;
+* `tests/audit/test_checkout_payment.py` never exercises the flow.
+
+**Consequence:** a customer without enough wallet balance is told to top up and has **no path to pay for the order by card**, even though the whole flow behind it is written. Two ways out — both are payment-logic decisions, so this is parked pending your explicit approval:
+* **(a) wire it up:** add a «💳 پرداخت کارتی و ارسال رسید» button to the insufficient-balance / cart screen (`pay:submit:{order_id}`);
+* **(b) delete it:** remove the unreachable handler, the `PaymentStates.waiting_receipt` state and its two message handlers.
+Nothing was changed here.
+
+### **O2 – The same D1 bug class still exists in 4 admin-scope sites (deferred to the admin phase)**
+`admin_backup.py:35`, `admin_backup.py:89`, `admin_orders.py:642`, `admin_payments.py:117` still call raw `edit_text`/`edit_media`. They are not customer flows, so they were left untouched and are listed here so the class is not lost.
+
+### **O3 – Hygiene backlog: 19 pre-existing ruff findings (`E9`/`F`/`B`)**
+Measured on the changed files: **baseline HEAD = 20, after Phase 4 = 19** — i.e. **zero introduced**, one removed. They are 18 auto-fixable unused imports/assignments (`F401`/`F841`) plus one hidden fix; sweeping them is a separate, repo-wide decision, not a Phase-4 change.
+
+## 📊 Test-infrastructure upgrades that make this phase provable
+
+A test that does not model Telegram's real behaviour cannot see this class of bug, so the harness was corrected first:
+
+1. **Keyboard retention on edit** (`tests/audit/harness.py`): Telegram keeps the previous `reply_markup` when an edit omits it — the fake session now tracks per-message state and applies the same rule, so stale action buttons are visible to assertions (`test_ticket_close_*` fails without this).
+2. **`fail_edit_not_modified` now also covers `EditMessageMedia`**, and the tests assert `AnswerCallbackQuery` is still emitted (the actual user-visible symptom).
+3. **Crawler literal extraction** (`tests/audit/test_ui_crawl.py`) also scans the `back_button`/`home_button`/`get_cancel_button` helper literals — this is how D2 (`cart:view`) stays dead-button-proof.
+4. **DB factories** (`tests/audit/db.py`): `make_custom`, `make_custom_category`, and `image_url` support on `make_product`/`make_config`, so banner/detail paths are testable.
+
+## ✅ Phase 4 verification appendix (exact commands & results)
+
+```bash
+# customer-flow proof tests
+python3 -m pytest tests/audit/test_phase4_flows.py -q
+#   → 6 passed in 10.19s
+# proof they pin real defects (pre-fix sources restored from git, tests unchanged):
+#   → 5 failed / 1 passed  (all six assertions above fail without their fix)
+# isolation proof for D5: revert only bot/handlers/my_account.py
+#   → 1 failed (test_wallet_ledger_signs_credits_from_amount), 5 passed
+
+# full audit suite (throwaway SQLite, no repo data touched)
+python3 -m pytest tests/audit -q
+#   → 30 passed in 52.27s          (was 24 passed before this phase)
+
+# repository suite on a throwaway DB
+BOT_TOKEN=… OWNER_ID=… ADMIN_PASSWORD=… \
+DATABASE_URL="sqlite+aiosqlite:////tmp/repo_p4.db" \
+python3 -m pytest tests/ -q --ignore=tests/audit
+#   → 47 passed, 3 failed — unchanged from the Phase 2/3 baseline
+#     (test_wallet_reference_is_unique, test_same_order_concurrent_wallet_callbacks_charge_once,
+#      test_500_concurrent_customer_checkouts_and_admin_reads; all pre-existing, reproduced on 0ea2986)
+
+# static check on every file this phase touched
+python3 -m ruff check --select E9,F,B <changed files>
+#   → 19 findings, all pre-existing (HEAD baseline on the same files: 20) — no new ones
+```
+
+**Data-safety note:** Phase 4 was developed and verified exclusively against throwaway SQLite
+databases under `/tmp` (`/tmp/repo_p4.db`, plus the per-test DBs created by `tests/audit`).
+The production `noxbot.db` was **not** present in this environment during Phase 4 (see the
+workspace note below), so no production row could be read or modified.
+
+**Workspace warning (operational, not a code defect):** the sandbox restored from a snapshot
+took the working tree back to commit `fdddb0e` and, because `.gitignore` excludes `*.db`,
+`backups/`, `exports/` and `logs/`, those **untracked runtime artifacts are gone from the
+sandbox**. They were never part of git (`git check-ignore` confirms `noxbot.db` is ignored),
+so anything committed and pushed (`5ff63e4` and this phase) is intact; the live database and
+the log/backup folders only exist on the machine that runs the bot.

@@ -54,6 +54,11 @@ class FakeTelegramSession(BaseSession):
         self.bot_username = "nox_test_bot"
         # Fault injection
         self.fail_edit_not_modified = False
+        # Live (chat_id, message_id) → {text, reply_markup}. Telegram keeps the
+        # previous keyboard when an edit omits reply_markup, and the audit
+        # tests must see that too (stale action buttons would otherwise look
+        # like "no buttons").
+        self.message_state: dict[tuple[Any, Any], dict[str, Any]] = {}
         self.fail_next_with: dict[str, str] = {}
 
     # -- BaseSession interface ------------------------------------------- #
@@ -80,7 +85,7 @@ class FakeTelegramSession(BaseSession):
         error = self.fail_next_with.pop(name, None)
         if error:
             raise TelegramBadRequest(method=method, message=error)
-        if name in ("EditMessageText", "EditMessageCaption") and self.fail_edit_not_modified:
+        if name in ("EditMessageText", "EditMessageCaption", "EditMessageMedia") and self.fail_edit_not_modified:
             raise TelegramBadRequest(
                 method=method,
                 message="Bad Request: message is not modified: specified new message content "
@@ -116,23 +121,34 @@ class FakeTelegramSession(BaseSession):
                     "at": time.time(),
                 }
             )
+            self.message_state[(payload.get("chat_id"), msg.message_id)] = {
+                "text": text,
+                "reply_markup": payload.get("reply_markup"),
+            }
             return msg
 
         if name in ("EditMessageText", "EditMessageCaption"):
             mid = payload.get("message_id") or 0
             chat_id = payload.get("chat_id")
             text = payload.get("text") or payload.get("caption") or ""
+            previous = self.message_state.get((chat_id, mid), {})
+            # Telegram semantics: an edit without reply_markup keeps the keyboard.
+            effective_markup = payload.get("reply_markup", previous.get("reply_markup"))
             self.sent.append(
                 {
                     "kind": "Edit" + name,
                     "chat_id": chat_id,
                     "message_id": mid,
                     "text": text,
-                    "reply_markup": payload.get("reply_markup"),
+                    "reply_markup": effective_markup,
                     "parse_mode": payload.get("parse_mode"),
                     "at": time.time(),
                 }
             )
+            self.message_state[(chat_id, mid)] = {
+                "text": text,
+                "reply_markup": effective_markup,
+            }
             return Message(
                 message_id=int(mid or 1),
                 date=datetime.now(timezone.utc),

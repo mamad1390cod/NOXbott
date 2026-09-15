@@ -7,6 +7,7 @@ from aiogram import BaseMiddleware
 from aiogram.types import CallbackQuery, Message, TelegramObject
 
 from bot.services.mandatory_membership import MandatoryMembershipService
+from bot.utils.editing import safe_edit_text
 from bot.services.rbac import RbacService
 
 
@@ -47,7 +48,9 @@ class MandatoryMembershipMiddleware(BaseMiddleware):
                 show_alert=True,
             )
             if event.message:
-                await event.message.edit_text(text, reply_markup=markup)
+                # The gate is re-rendered on every blocked tap; identical
+                # content must not raise "message is not modified".
+                await safe_edit_text(event, text, reply_markup=markup)
         elif isinstance(event, Message):
             await event.answer(text, reply_markup=markup)
         return None

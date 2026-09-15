@@ -114,9 +114,11 @@ async def collect_customer_name(message: Message, state: FSMContext, uow, user: 
         
         text += f"\n💰 مجموع: {summary['total_price']} تومان"
         
+        # ``cart:view`` had no handler (the cart screen is ``menu:cart``),
+        # so the button did nothing after the first purchase.
         await message.answer(
             text,
-            reply_markup=single_button_kb(back_button("cart:view"))
+            reply_markup=single_button_kb(back_button("menu:cart"))
         )
     except Exception as e:
         logger.exception(f"Failed to save customer info: {e}")

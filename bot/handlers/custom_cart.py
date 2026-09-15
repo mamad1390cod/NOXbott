@@ -166,14 +166,11 @@ async def collect_codm_username(
     selected = [i for i in items if i.id in item_ids]
 
     lines = []
-    total = 0
     for item in selected:
         if not item.custom:
             continue
         lines.append(f"• {item.custom.title}")
-        total += 0  # will recompute
 
-    # Recompute total
     total = sum(
         (i.custom.entry_fee if i.custom and i.custom.type.value == "paid" else 0)
         for i in selected

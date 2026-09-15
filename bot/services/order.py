@@ -433,18 +433,19 @@ class OrderService(BaseService):
         admin: User,
         reason: str | None = None,
     ) -> Order:
-        """Refund a paid order → REFUNDED (restores stock)."""
-        if not order.is_paid:
-            raise OrderStatusError("فقط سفارش پرداخت‌شده قابل بازگشت وجه است")
-        order = await self.transition_to(
-            order, OrderStatus.REFUNDED, admin=admin, note=reason or "بازگشت وجه",
+        """Refund a paid order → REFUNDED, crediting the wallet.
+
+        Delegates to :class:`RefundService`, the single implementation
+        that locks the user row, credits the balance, writes the refund
+        ledger entry and restores stock. This method used to flip the
+        status/payment on its own *without* paying the customer back,
+        which would silently lose money if it were ever called.
+        """
+        from bot.services.refund import RefundService
+
+        return await RefundService(self.uow).refund_order(
+            order, admin, reason=reason
         )
-        payment = self._get_pending_payment(order)
-        if payment and payment.status == PaymentStatus.APPROVED:
-            payment.status = PaymentStatus.REJECTED  # no refund ledger yet
-        await self.uow.orders.restore_items_stock(order)
-        await self.uow.flush()
-        return order
 
     # --- Notes / delivery -------------------------------------------------- #
     async def set_internal_note(self, order_id: str, note: str, admin: User | None = None) -> Order | None:

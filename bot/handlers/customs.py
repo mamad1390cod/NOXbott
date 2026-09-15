@@ -9,7 +9,7 @@ from bot.services.custom import CustomService
 from bot.services.custom_cart import CustomCartService
 from bot.models.user import User
 from bot.utils.format import format_price
-from bot.utils.editing import safe_edit_text
+from bot.utils.editing import safe_edit_media, safe_edit_text
 
 router = Router(name="customs")
 
@@ -92,7 +92,8 @@ async def cb_custom_detail(callback: CallbackQuery, uow, user: User) -> None:
     kb = custom_detail_keyboard(custom_id, is_registered=is_registered)
 
     if custom.banner_url:
-        await callback.message.edit_media(
+        await safe_edit_media(
+            callback,
             types.InputMediaPhoto(media=custom.banner_url, caption=text),
             reply_markup=kb,
         )

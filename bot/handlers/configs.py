@@ -11,7 +11,7 @@ from bot.services.config_shop import ConfigShopService
 from bot.models.user import User
 from bot.texts import CART_ADDED
 from bot.utils.format import format_price
-from bot.utils.editing import safe_edit_text
+from bot.utils.editing import safe_edit_media, safe_edit_text
 
 router = Router(name="configs")
 
@@ -84,7 +84,8 @@ async def cb_config_detail(callback: CallbackQuery, uow, user: User) -> None:
     kb = types.InlineKeyboardMarkup(inline_keyboard=keyboard)
 
     if product.image_url:
-        await callback.message.edit_media(
+        await safe_edit_media(
+            callback,
             types.InputMediaPhoto(media=product.image_url, caption=text),
             reply_markup=kb,
         )

@@ -148,20 +148,8 @@ async def cb_ticket_list(callback: CallbackQuery, uow, user: User) -> None:
     await callback.answer()
 
 
-@router.callback_query(F.data.startswith("ticket:view:"))
-async def cb_ticket_view(callback: CallbackQuery, uow, user: User) -> None:
-    """View a single ticket."""
-    parts = callback.data.split(":", 2)
-    if len(parts) < 3:
-        await callback.answer("تیکت یافت نشد", show_alert=True)
-        return
-    ticket_id = parts[2]
-    ticket_service = TicketService(uow)
-    ticket = await ticket_service.get_ticket(ticket_id)
-    if not ticket:
-        await callback.answer("تیکت یافت نشد", show_alert=True)
-        return
-
+def _ticket_detail_text(ticket) -> str:
+    """Render the ticket detail screen (shared by view and close)."""
     status_map = {
         "open": "🟢 باز",
         "in_progress": "🟠 در حال بررسی",
@@ -182,10 +170,28 @@ async def cb_ticket_view(callback: CallbackQuery, uow, user: User) -> None:
     for msg in ticket.messages:
         if msg.is_admin:
             text += f"\n👨💼 <b>پاسخ ادمین:</b>\n{msg.message}\n"
+    return text
 
-    await safe_edit_text(callback, 
-        text,
-        reply_markup=ticket_detail_keyboard(ticket_id),
+
+@router.callback_query(F.data.startswith("ticket:view:"))
+async def cb_ticket_view(callback: CallbackQuery, uow, user: User) -> None:
+    """View a single ticket."""
+    parts = callback.data.split(":", 2)
+    if len(parts) < 3:
+        await callback.answer("تیکت یافت نشد", show_alert=True)
+        return
+    ticket_id = parts[2]
+    ticket_service = TicketService(uow)
+    ticket = await ticket_service.get_ticket(ticket_id)
+    if not ticket:
+        await callback.answer("تیکت یافت نشد", show_alert=True)
+        return
+
+    is_closed = ticket.status.value == "closed"
+    await safe_edit_text(
+        callback,
+        _ticket_detail_text(ticket),
+        reply_markup=ticket_detail_keyboard(ticket_id, closed=is_closed),
     )
     await callback.answer()
 
@@ -263,5 +269,14 @@ async def cb_ticket_close(callback: CallbackQuery, uow, user: User) -> None:
     await uow.flush()
 
     await uow.commit()
+
+    # Refresh the screen: otherwise the user keeps seeing an open ticket with
+    # «پاسخ»/«تکمیل شد» buttons that can no longer do anything useful.
+    closed_ticket = await ticket_service.get_ticket(ticket_id)
+    if closed_ticket:
+        await safe_edit_text(
+            callback,
+            _ticket_detail_text(closed_ticket),
+            reply_markup=ticket_detail_keyboard(ticket_id, closed=True),
+        )
     await callback.answer("تیکت بسته شد")
-    await safe_edit_text(callback, "✅ <b>تیکت بسته شد.</b>")

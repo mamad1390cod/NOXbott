@@ -9,7 +9,7 @@ don't crash the handler.
 import logging
 
 from aiogram.exceptions import TelegramBadRequest
-from aiogram.types import CallbackQuery, InlineKeyboardMarkup
+from aiogram.types import CallbackQuery, InlineKeyboardMarkup, InputMediaPhoto
 
 logger = logging.getLogger(__name__)
 
@@ -54,4 +54,29 @@ async def safe_edit_caption(
         return False
     except Exception as e:
         logger.warning("edit_caption error: %s", e)
+        return False
+
+
+async def safe_edit_media(
+    callback: CallbackQuery,
+    media: InputMediaPhoto,
+    reply_markup: InlineKeyboardMarkup | None = None,
+) -> bool:
+    """Like safe_edit_text but for screens that display a photo.
+
+    Telegram raises the same "message is not modified" BadRequest when a
+    product/config/custom banner is re-rendered with identical media + caption
+    + markup (e.g. tapping the same list entry twice), which otherwise escapes
+    the handler as an exception.
+    """
+    try:
+        await callback.message.edit_media(media, reply_markup=reply_markup)
+        return True
+    except TelegramBadRequest as e:
+        if "message is not modified" in str(e) or "not modified" in str(e):
+            return True
+        logger.warning("edit_media failed: %s", e)
+        return False
+    except Exception as e:
+        logger.warning("edit_media error: %s", e)
         return False

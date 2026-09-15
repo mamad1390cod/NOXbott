@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from bot.database.session import get_session_factory
 from bot.models.category import Category
 from bot.models.config_shop import ConfigProduct
+from bot.models.custom import Custom, CustomCategory, CustomStatus, CustomType
 from bot.models.discount_code import DiscountCode, DiscountType
 from bot.models.order import Order, OrderItem, OrderStatus
 from bot.models.payment import Payment, PaymentStatus
@@ -78,6 +79,7 @@ async def make_product(
     title: str | None = None,
     requires_account_info: bool = False,
     ptype: str = "digital",
+    image_url: str | None = None,
 ) -> Product:
     product = Product(
         title=title or f"Product {next(_seq)}",
@@ -90,6 +92,7 @@ async def make_product(
         category_id=category_id,
         type=ptype,
         requires_account_info=requires_account_info,
+        image_url=image_url,
     )
     session.add(product)
     await session.flush()
@@ -104,6 +107,7 @@ async def make_config(
     unlimited: bool = False,
     visible: bool = True,
     category_id: str | None = None,
+    image_url: str | None = None,
 ) -> ConfigProduct:
     cfg = ConfigProduct(
         title=f"Config {next(_seq)}",
@@ -112,10 +116,44 @@ async def make_config(
         unlimited_stock=unlimited,
         is_visible=visible,
         category_id=category_id,
+        image_url=image_url,
     )
     session.add(cfg)
     await session.flush()
     return cfg
+
+
+async def make_custom(
+    session: AsyncSession,
+    *,
+    title: str | None = None,
+    entry_fee: int = 0,
+    banner_url: str | None = None,
+    category_id: str | None = None,
+    is_visible: bool = True,
+    status: CustomStatus = CustomStatus.REGISTRATION_OPEN,
+) -> Custom:
+    custom = Custom(
+        title=title or f"Custom {next(_seq)}",
+        description="audit custom",
+        rules="audit rules",
+        type=CustomType.FREE if entry_fee == 0 else CustomType.PAID,
+        status=status,
+        entry_fee=entry_fee,
+        banner_url=banner_url,
+        custom_category_id=category_id,
+        is_visible=is_visible,
+    )
+    session.add(custom)
+    await session.flush()
+    return custom
+
+
+async def make_custom_category(session: AsyncSession, name: str | None = None) -> CustomCategory:
+    category = CustomCategory(name=name or f"customcat{next(_seq)}", is_active=True)
+    session.add(category)
+    await session.flush()
+    return category
 
 
 async def make_coupon(

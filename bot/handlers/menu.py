@@ -11,6 +11,7 @@ from bot.models.user import User
 from bot.services.mandatory_membership import MandatoryMembershipService
 from bot.content.telegram_bot_builder import CONTACT_USER_ID, OFFER_TEXT
 from bot.texts import MAIN_MENU, WELCOME
+from bot.utils.editing import safe_edit_text
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 router = Router(name="menu")
@@ -24,7 +25,9 @@ async def _send_main_menu(event: Message | CallbackQuery, edit: bool = True) -> 
     kb = main_menu_keyboard(is_admin=is_admin)
 
     if isinstance(event, CallbackQuery):
-        await event.message.edit_text(MAIN_MENU(), reply_markup=kb)
+        # safe_edit_text: tapping «خانه» while the menu is already on
+        # screen must not raise Telegram's "message is not modified".
+        await safe_edit_text(event, MAIN_MENU(), reply_markup=kb)
         await event.answer()
     else:
         await event.answer(MAIN_MENU(), reply_markup=kb)
@@ -78,7 +81,7 @@ async def cb_bot_builder(callback: CallbackQuery) -> None:
             [InlineKeyboardButton(text="🔙 بازگشت", callback_data="menu:home")],
         ]
     )
-    await callback.message.edit_text(OFFER_TEXT, reply_markup=keyboard)
+    await safe_edit_text(callback, OFFER_TEXT, reply_markup=keyboard)
     await callback.answer()
 
 
@@ -97,7 +100,8 @@ async def cb_membership_verify(
     if not await membership.verify_user(callback.bot, user):
         await callback.answer("هنوز عضویت شما کامل نشده است.", show_alert=True)
         return
-    await callback.message.edit_text(
+    await safe_edit_text(
+        callback,
         MAIN_MENU(),
         reply_markup=main_menu_keyboard(
             is_admin=user.telegram_id in get_settings().admin_ids

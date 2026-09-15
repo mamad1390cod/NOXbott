@@ -100,11 +100,17 @@ async def test_all_callbacks_have_handlers(sim, seeded):
     root = Path(__file__).resolve().parents[2] / "bot"
     literals: set[str] = set()
     pattern = re.compile(r'callback_data\s*=\s*f?["\']([^"\']+)["\']')
+    # Keyboard helpers take the callback as a positional argument, so their
+    # literals are invisible to the ``callback_data=`` scan above. A dead one
+    # (``back_button("cart:view")``) shipped exactly because of that blind spot.
+    helper_pattern = re.compile(
+        r'(?:back_button|home_button|get_cancel_button)\(\s*["\']([^"\']+)["\']'
+    )
     for path in list(root.rglob("*.py")):
         if "__pycache__" in str(path):
             continue
         text = path.read_text(encoding="utf-8", errors="ignore")
-        for match in pattern.finditer(text):
+        for match in list(pattern.finditer(text)) + list(helper_pattern.finditer(text)):
             value = match.group(1)
             # Drop f-string placeholders → keep the static prefix with a wildcard
             value = re.sub(r"\{[^}]*\}", "*", value)
