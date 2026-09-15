@@ -332,7 +332,10 @@ fix → one proof test per defect that **fails on the pre-fix source**.
 | D12 | Admin rights were granted/revoked under `MANAGE_USERS` → a moderator could promote himself / demote finance | **CRITICAL** | FIXED |
 | D13 | User deletion could erase the owner account (orders/payments cascade) | **CRITICAL** | FIXED |
 | D14 | Broadcast send reported success without sending; schedule prompt had no handler | **CRITICAL** | FIXED |
+| D15 | Crafted RBAC payload could assign the ALL-permissions «مالک» role | **CRITICAL** | FIXED |
+| D16 | Stale profile buttons faked success and wrote phantom audit entries | MEDIUM | FIXED |
 | — | Broadcast queue screen (pause/resume a scheduled broadcast) | feature | OPEN — awaiting decision |
+| — | Router-gated callbacks are never answered (client spinner) | MEDIUM | OPEN — awaiting decision |
 
 ## 🟠 HIGH
 
@@ -389,6 +392,11 @@ python3 -m pytest tests/audit/test_phase5_users.py -q
 python3 -m pytest tests/audit/test_phase5_broadcast.py -q
 #   → 6 passed in 9.17s
 # pre-fix sources, tests unchanged → 6 failed
+
+# RBAC screens: owner-role escalation + stale-profile honesty (D15, D16)
+python3 -m pytest tests/audit/test_phase5_roles.py -q
+#   → 7 passed in 9.89s
+# pre-fix admin_roles.py + rbac.py, tests unchanged → 5 failed, 2 passed
 # pre-fix sources, tests unchanged → 6 failed (the real Telegram error is visible:
 #   "Bad Request: there is no media in the message to edit")
 
@@ -399,7 +407,7 @@ python3 -m pytest tests/audit/test_phase4_flows.py -q
 
 # full audit suite with the stricter harness semantics
 python3 -m pytest tests/audit -q
-#   → 61 passed in 81.39s         (was 49 before this batch)
+#   → 68 passed in 96.40s         (was 61 before this batch)
 
 # repository suite on a throwaway DB
 DATABASE_URL="sqlite+aiosqlite:////tmp/repo_p5.db" python3 -m pytest tests/ -q --ignore=tests/audit
@@ -471,6 +479,29 @@ pass on today's code) — the defect-pinning proofs are the ones called out per 
 
 ### 📋 OPEN — broadcast queue management screen (feature, needs your go-ahead)
 `BroadcastService` already exposes `pause`, `resume`, `cancel` and `schedule_due`, but no screen lists the pending/scheduled broadcasts and lets an admin act on one (with its id). Today «توقف» can only be honest about having nothing to pause. Building that screen is a feature, not a bug fix — left untouched pending your decision.
+
+### **BUG #D15 – the «مالک» (owner) role could be assigned with a crafted payload**
+**Where:** `bot/handlers/admin/admin_roles.py` (`cb_addadmin_role`, `cb_set_role`) → `bot/services/rbac.py`.
+
+**Why it is wrong:** the owner role carries `ALL_PERMISSIONS` (`ROLE_DEFAULTS[RoleSlug.OWNER]`), and *being* the owner is decided by `settings.admin_ids` — the role itself is never meant to be handed out. Both pickers know this (`roles = [r for r in all_roles if r.slug != "owner"]`, with the comment "owner can't be assigned"), but **only the keyboards enforced it**: the handlers trusted whatever `role_id` arrived, so `admin:roles:addrole:<owner_role_id>` and `admin:roles:setrole:<owner_role_id>` minted a full-power admin.
+
+**Impact:** anyone holding `MANAGE_ADMINS` — the permission the owner delegates when they want *help* managing admins — could create an account that outranks them (settings change, database restore, deletions, payment approval), or silently promote an existing admin to that level. The UI said the role was unassignable; the server disagreed.
+
+**Fix (root, at the service chokepoint):** `RbacService._is_owner_role()` + a `ValueError("نقش مالک قابل تخصیص نیست")` in `create_admin` **and** `set_admin_role`, so no caller can bypass the rule; the two handlers additionally refuse early with a clear alert (and `cb_addadmin_role` now has a real `except ValueError` path instead of an unhandled exception).
+
+**Proof:** `tests/audit/test_phase5_roles.py::test_owner_role_cannot_be_assigned_via_crafted_addrole`, `::test_owner_role_cannot_be_assigned_via_crafted_setrole` and `::test_delegated_admin_cannot_mint_a_full_power_admin` (a delegate *with* MANAGE_ADMINS is still bounded) — all three fail on the pre-fix sources.
+
+### **BUG #D16 – stale admin-profile buttons faked a change and logged a phantom audit entry**
+**Where:** `bot/handlers/admin/admin_roles.py` — `cb_enable`, `cb_disable`, `cb_set_role`, `cb_remove`.
+
+**Symptom:** with a stale keyboard (the profile was removed in another session, or the message outlived it), «⚪ غیرفعال» / «▶️ فعال» / «🎭 تغییر نقش» still answered with success *and wrote a `SETTINGS_CHANGE` audit entry describing a change that never happened*; `cb_set_role` even committed "نقش … تغییر کرد" for a non-admin. Worse, after a **successful** «🗑 حذف ادمین» the screen kept showing the removed admin's profile — with its now-stale action buttons.
+
+**Fix:** every one of them checks the result of the service call (`set_admin_status` / `set_admin_role` / `remove_admin`) and refuses with "⚠️ پروفایل ادمین یافت نشد" (or "این کاربر دیگر ادمین نیست") without writing any log; `cb_remove` re-renders the admin list so the buttons on screen match reality. A redundant trailing edit that immediately overwrote that fresh render was removed, and a dead local import in `do_suspend` was dropped.
+
+**Proof:** `test_stale_profile_actions_are_refused_without_phantom_logs` (asserts the alert *and* that the `SETTINGS_CHANGE` count is unchanged) and `test_remove_admin_refreshes_to_a_live_screen` — both fail on the pre-fix sources; `test_permission_toggle_still_works_and_is_logged` proves the legitimate editor (toggle both ways + audit log) is untouched.
+
+### 📋 OPEN — router-gated callbacks are never answered
+When `IsAdmin`/`HasPermission` rejects a callback, aiogram simply finds no handler: **nothing answers the tap**, so the user's client keeps spinning (there is no trailing fallback router — only the test harness mounts a probe that records it). `test_moderator_cannot_open_the_roles_panel` documents the state (a moderator gets no edit screen, cannot grant itself `MANAGE_ADMINS`) and asserts the unhandled event. The clean fix is a last-resort router that answers "این بخش برای شما در دسترس نیست" for unmatched callbacks on both surfaces — a dispatcher-wide behaviour change, so it waits for your go-ahead.
 
 **Still to read in this phase:** the admin handlers themselves — `admin_topup.py`
 (top-up approval, money), `admin_orders.py`, `admin_customs.py`, `admin_tickets.py`

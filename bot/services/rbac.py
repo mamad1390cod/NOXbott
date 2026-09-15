@@ -157,6 +157,11 @@ class RbacService(BaseService):
         if not await self.has_permission(user, perm):
             raise PermissionDenied(perm)
 
+    @staticmethod
+    def _is_owner_role(role: AdminRole) -> bool:
+        """The built-in owner role (ALL_PERMISSIONS) is not assignable."""
+        return role.slug == RoleSlug.OWNER.value
+
     # --- Role management --------------------------------------------------- #
     async def list_roles(self, *, include_system: bool = True) -> Sequence[AdminRole]:
         return await self.uow.admin_roles.list_roles(include_system=include_system)
@@ -237,6 +242,12 @@ class RbacService(BaseService):
         role = await self.get_role_by_slug(role_slug)
         if not role:
             raise ValueError("نقش نامعتبر است")
+        if self._is_owner_role(role):
+            # The owner role carries ALL_PERMISSIONS. Owner status itself
+            # comes from settings.admin_ids, so this role must never be
+            # handed out here — that would mint a full-power admin that
+            # the owner never appointed.
+            raise ValueError("نقش مالک قابل تخصیص نیست")
 
         profile = await self.uow.admin_profiles.create(
             user_id=user.id,
@@ -256,6 +267,8 @@ class RbacService(BaseService):
         role = await self.get_role_by_slug(role_slug)
         if not role:
             return None
+        if self._is_owner_role(role):
+            raise ValueError("نقش مالک قابل تخصیص نیست")
         return await self.uow.admin_profiles.set_role(user_id, role.id)
 
     async def set_admin_status(

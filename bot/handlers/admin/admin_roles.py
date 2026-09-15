@@ -187,8 +187,18 @@ async def cb_addadmin_role(callback: CallbackQuery, state: FSMContext, uow, user
         await callback.answer("خطا", show_alert=True)
         await state.clear()
         return
+    if role.slug == RoleSlug.OWNER.value:
+        # The picker hides the owner role; the payload must be refused too.
+        await callback.answer("⚠️ نقش مالک قابل تخصیص نیست", show_alert=True)
+        await state.clear()
+        return
 
-    profile = await rbac.create_admin(target.telegram_id, role.slug, added_by=user)
+    try:
+        profile = await rbac.create_admin(target.telegram_id, role.slug, added_by=user)
+    except ValueError as e:
+        await callback.answer(f"⚠️ {e}", show_alert=True)
+        await state.clear()
+        return
     await uow.flush()
 
     await uow.commit()
@@ -211,20 +221,17 @@ async def cb_addadmin_role(callback: CallbackQuery, state: FSMContext, uow, user
 
 # --- Role change -------------------------------------------------------- #
 @router.callback_query(F.data.startswith("rc:"))
-async def cb_change_role(callback: CallbackQuery, state: FSMContext) -> None:
+async def cb_change_role(callback: CallbackQuery, state: FSMContext, uow, user: User) -> None:
     parts = callback.data.split(":")
     if len(parts) < 2:
         await callback.answer("دسترسی نامعتبر", show_alert=True)
         return
     user_id = parts[1]  # target user's id
     await state.set_data({"target_user_id": user_id})
-    from bot.database.uow import UnitOfWork
-    uow = UnitOfWork()
-    async with uow:
-        rbac = RbacService(uow)
-        # Show all roles except owner
-        all_roles = await rbac.list_roles(include_system=True)
-        roles = [r for r in all_roles if r.slug != "owner"]
+    rbac = RbacService(uow)
+    # Show all roles except owner (owner is not assignable)
+    all_roles = await rbac.list_roles(include_system=True)
+    roles = [r for r in all_roles if r.slug != RoleSlug.OWNER.value]
     await state.set_state(AdminRolesStates.waiting_role_pick)
     await callback.message.answer("🎭 نقش جدید را انتخاب کنید:", reply_markup=role_picker_keyboard(roles, "setrole"))
     await callback.answer()
@@ -246,9 +253,24 @@ async def cb_set_role(callback: CallbackQuery, state: FSMContext, uow, user: Use
         await callback.answer("مشکل در یافتن نقش", show_alert=True)
         await state.clear()
         return
+    if role.slug == RoleSlug.OWNER.value:
+        await callback.answer("⚠️ نقش مالک قابل تخصیص نیست", show_alert=True)
+        await state.clear()
+        return
     old_profile = await rbac.uow.admin_profiles.get_by_user_id(target_user_id)
-    old_role_slug = old_profile.role.slug if old_profile and old_profile.role else None
-    await rbac.set_admin_role(target_user_id, role.slug)
+    if not old_profile:
+        # Stale keyboard: the profile was removed in the meantime. Acting
+        # here used to log a role change that never happened and report
+        # success to the admin.
+        await callback.answer("⚠️ این کاربر دیگر ادمین نیست", show_alert=True)
+        await state.clear()
+        return
+    old_role_slug = old_profile.role.slug if old_profile.role else None
+    updated = await rbac.set_admin_role(target_user_id, role.slug)
+    if not updated:
+        await callback.answer("⚠️ تغییر نقش انجام نشد", show_alert=True)
+        await state.clear()
+        return
     await uow.flush()
 
     await uow.commit()
@@ -303,7 +325,11 @@ async def cb_enable(callback: CallbackQuery, uow, user: User) -> None:
         return
     user_id = parts[3]
     rbac = RbacService(uow)
-    await rbac.set_admin_status(user_id, AdminStatus.ACTIVE)
+    updated = await rbac.set_admin_status(user_id, AdminStatus.ACTIVE)
+    if not updated:
+        # Stale keyboard: nothing to change, so nothing to log either.
+        await callback.answer("⚠️ پروفایل ادمین یافت نشد", show_alert=True)
+        return
     await uow.flush()
 
     await uow.commit()
@@ -323,7 +349,11 @@ async def cb_disable(callback: CallbackQuery, uow, user: User) -> None:
         return
     user_id = parts[3]
     rbac = RbacService(uow)
-    await rbac.set_admin_status(user_id, AdminStatus.DISABLED)
+    updated = await rbac.set_admin_status(user_id, AdminStatus.DISABLED)
+    if not updated:
+        # Stale keyboard: nothing to change, so nothing to log either.
+        await callback.answer("⚠️ پروفایل ادمین یافت نشد", show_alert=True)
+        return
     await uow.flush()
 
     await uow.commit()
@@ -370,7 +400,6 @@ async def do_suspend(message: Message, state: FSMContext, uow, user: User) -> No
     await uow.flush()
 
     await uow.commit()
-    from bot.keyboards.rbac import admin_list_keyboard
     await state.clear()
     await message.answer("🔒 ادمین تعلیق شد.", reply_markup=single_button_kb(back_button("admin:roles")))
 
@@ -387,7 +416,10 @@ async def cb_remove(callback: CallbackQuery, uow, user: User) -> None:
     if rbac.is_owner(target) if target else False:
         await callback.answer("مالک قابل حذف نیست", show_alert=True)
         return
-    await rbac.remove_admin(user_id)
+    removed = await rbac.remove_admin(user_id)
+    if not removed:
+        await callback.answer("⚠️ پروفایل ادمین یافت نشد", show_alert=True)
+        return
     await uow.flush()
 
     await uow.commit()
@@ -396,5 +428,6 @@ async def cb_remove(callback: CallbackQuery, uow, user: User) -> None:
     await uow.flush()
 
     await uow.commit()
+    # Stay on a live screen: the removed profile's buttons are now stale.
+    await cb_admin_list(callback, uow, user)
     await callback.answer("حذف شد")
-    await safe_edit_text(callback, "✅ ادمین حذف شد.", reply_markup=single_button_kb(back_button("admin:roles")))
