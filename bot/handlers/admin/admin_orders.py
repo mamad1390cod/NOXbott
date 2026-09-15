@@ -435,6 +435,27 @@ async def cb_aorder_view(callback: CallbackQuery, uow, user: User) -> None:
 
 
 # --- Status transitions ---------------------------------------------------- #
+async def _after_transition(
+    callback: CallbackQuery,
+    uow,
+    user: User,
+    order_id: str,
+    to_status: OrderStatus,
+) -> None:
+    """Audit-log a completed transition and refresh the detail screen."""
+    api = AdminService(uow)
+    await api.log_action(user, LogAction.ORDER_EDIT, target_id=order_id,
+                         description=f"تغییر وضعیت به {to_status.value}")
+    await uow.flush()
+
+    await uow.commit()
+    await callback.answer("وضعیت تغییر کرد")
+    os = OrderService(uow)
+    fresh = await os.get_order(order_id)
+    if fresh:
+        await _show_order_detail(callback, uow, user, fresh)
+
+
 async def _transition(
     callback: CallbackQuery,
     uow,
@@ -452,16 +473,34 @@ async def _transition(
     except OrderStatusError as e:
         await callback.answer(str(e), show_alert=True)
         return
-    api = AdminService(uow)
-    await api.log_action(user, LogAction.ORDER_EDIT, target_id=order.id,
-                         description=f"تغییر وضعیت به {to_status.value}")
-    await uow.flush()
+    await _after_transition(callback, uow, user, order.id, to_status)
 
-    await uow.commit()
-    await callback.answer("وضعیت تغییر کرد")
-    fresh = await os.get_order(order.id)
-    if fresh:
-        await _show_order_detail(callback, uow, user, fresh)
+
+async def _approve_order_payment(
+    callback: CallbackQuery,
+    uow,
+    user: User,
+    order: Order,
+) -> None:
+    """«✅ تایید پرداخت» from the order screen.
+
+    The button is shown while the order is PAYMENT_UPLOADED, but a bare
+    transition to APPROVED is illegal from there (it needs the reviewing step),
+    so the plain "change status" path only produced an error alert and never
+    approved anything. ``OrderService.approve_payment`` is the domain operation
+    for this and walks the legal steps (uploaded → reviewing → approved) while
+    marking the payment record approved — exactly what the button promises.
+    """
+    os = OrderService(uow, notifier=NotificationService(callback.bot, uow))
+    try:
+        await os.approve_payment(order, user, note="پرداخت تایید شد")
+        await uow.flush()
+
+        await uow.commit()
+    except OrderStatusError as e:
+        await callback.answer(str(e), show_alert=True)
+        return
+    await _after_transition(callback, uow, user, order.id, OrderStatus.APPROVED)
 
 
 @router.callback_query(F.data.startswith("aorder:review:"))
@@ -477,7 +516,7 @@ async def cb_aorder_approve(callback: CallbackQuery, uow, user: User) -> None:
     order = await _load_order(callback, uow)
     if not order:
         return
-    await _transition(callback, uow, user, order, OrderStatus.APPROVED, note="پرداخت تایید شد")
+    await _approve_order_payment(callback, uow, user, order)
 
 
 @router.callback_query(F.data.startswith("aorder:prepare:"))

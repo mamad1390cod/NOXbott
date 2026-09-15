@@ -15,8 +15,7 @@ from sqlalchemy import select
 
 from bot.database.session import get_session_factory
 from bot.models.payment import Payment, PaymentMethod, PaymentStatus
-from bot.models.user import User
-from tests.audit.db import make_category, make_product, make_user
+from tests.audit.db import get_balance, make_category, make_product, make_user
 from tests.audit.flows import ShopDriver, finish_account_info
 
 
@@ -156,9 +155,7 @@ async def test_admin_payment_detail_with_receipt_renders(sim):
     """
     factory = get_session_factory()
     async with factory() as session:
-        cat = await make_category(session)
         user = await make_user(session, balance=100_000, username="receipt_user")
-        product = await make_product(session, price=20_000, stock=2, category_id=cat.id)
         await session.commit()
         # a card order whose receipt is waiting for review
         from bot.models.order import Order, OrderStatus
@@ -183,7 +180,7 @@ async def test_admin_payment_detail_with_receipt_renders(sim):
         )
         session.add(payment)
         await session.commit()
-        tg, payment_id, uid = user.telegram_id, payment.id, user.id
+        payment_id, uid = payment.id, user.id
     await finish_account_info(uid)
 
     await sim.send("/start", sim.owner_id, first_name="Owner")
@@ -257,3 +254,236 @@ async def test_admin_payment_detail_rerender_survives(sim):
     assert any(name == "AnswerCallbackQuery" for name, _ in res["calls"]), (
         "the tap was not answered when the receipt screen did not change"
     )
+
+
+# --------------------------------------------------------------------------- #
+#  3. admin ticket handling must reach the customer
+# --------------------------------------------------------------------------- #
+
+
+async def _open_ticket(sim, username: str):
+    """A customer opens a ticket through the UI; returns its id + telegram id."""
+    from bot.models.ticket import Ticket, TicketCategory
+
+    factory = get_session_factory()
+    async with factory() as session:
+        user = await make_user(session, username=username)
+        category = TicketCategory(name=f"phase5 {username}", is_active=True)
+        session.add(category)
+        await session.commit()
+        tg, category_id, user_id = user.telegram_id, category.id, user.id
+    await finish_account_info(user_id)
+
+    await sim.send("/start", tg)
+    await sim.click("menu:support", tg)
+    await sim.click("ticket:new", tg)
+    res = await sim.click(f"tick_cat:{category_id}", tg)
+    assert res["ok"], res["error"]
+    res = await sim.send(f"body of {username}", tg)
+    assert res["ok"], res["error"]
+
+    async with factory() as session:
+        ticket = (
+            await session.execute(select(Ticket).where(Ticket.user_id == user_id))
+        ).scalars().one()
+        return ticket.id, tg, user_id
+
+
+async def test_admin_ticket_reply_reaches_the_customer(sim):
+    """An admin reply must be stored, move the status, and notify the customer."""
+    from bot.models.ticket import Ticket, TicketMessage, TicketStatus
+
+    ticket_id, tg, user_id = await _open_ticket(sim, "ticket_customer")
+
+    await sim.send("/start", sim.owner_id, first_name="Owner")
+    res = await sim.click(f"atick:view:{ticket_id}", sim.owner_id)
+    assert res["ok"], res["error"]
+
+    res = await sim.click(f"atick:reply:{ticket_id}", sim.owner_id)
+    assert res["ok"], res["error"]
+    res = await sim.send("admin answer text", sim.owner_id)
+    assert res["ok"], res["error"]
+
+    factory = get_session_factory()
+    async with factory() as session:
+        ticket = await session.get(Ticket, ticket_id)
+        status = ticket.status
+        replies = (
+            await session.execute(
+                select(TicketMessage).where(TicketMessage.ticket_id == ticket_id)
+            )
+        ).scalars().all()
+        admin_replies = [m for m in replies if m.is_admin and "admin answer text" in (m.message or "")]
+        assert status == TicketStatus.IN_PROGRESS, f"ticket status {status}"
+        assert admin_replies, "the admin reply was not stored"
+
+    # The customer must actually receive it.
+    assert any(
+        "admin answer text" in (m.get("text") or "")
+        for m in sim.session.sent
+        if str(m.get("chat_id")) == str(tg)
+    ), "the customer was not notified about the admin reply"
+
+
+async def test_admin_ticket_close_from_admin_side(sim):
+    """Closing a ticket as admin must land and notify the customer."""
+    from bot.models.ticket import Ticket, TicketStatus
+
+    ticket_id, tg, _user_id = await _open_ticket(sim, "ticket_customer2")
+
+    await sim.send("/start", sim.owner_id, first_name="Owner")
+    res = await sim.click(f"ticket:close:{ticket_id}", sim.owner_id)
+    assert res["ok"], res["error"]
+
+    factory = get_session_factory()
+    async with factory() as session:
+        status = (await session.get(Ticket, ticket_id)).status
+        assert status == TicketStatus.CLOSED, f"ticket status {status}"
+
+    screen = sim.last_screen(sim.owner_id)
+    buttons = sim.buttons((screen or {}).get("reply_markup"))
+    assert f"ticket:reply:{ticket_id}" not in buttons, (
+        f"a closed ticket still offers «پاسخ»: {buttons}"
+    )
+
+
+# --------------------------------------------------------------------------- #
+#  4. cancelling a custom must reach every participant
+# --------------------------------------------------------------------------- #
+
+
+async def test_admin_cancel_custom_notifies_participants(sim):
+    """Cancelling a custom must inform the players who registered for it."""
+    from bot.models.custom import CustomRegistration, CustomStatus
+    from tests.audit.db import make_custom, make_custom_category
+
+    factory = get_session_factory()
+    async with factory() as session:
+        cat = await make_custom_category(session)
+        custom = await make_custom(session, category_id=cat.id, title="CANCEL-ME")
+        player = await make_user(session, username="cancelled_player")
+        await session.commit()
+        custom_id, player_tg, player_id = custom.id, player.telegram_id, player.id
+
+    # register the player for the custom (to be notified)
+    async with factory() as session:
+        session.add(
+            CustomRegistration(
+                custom_id=custom_id,
+                user_id=player_id,
+                codm_username="cancel-player",
+            )
+        )
+        await session.commit()
+
+    await sim.send("/start", sim.owner_id, first_name="Owner")
+    res = await sim.click(f"acustom:cancel:{custom_id}", sim.owner_id)
+    assert res["ok"], res["error"]
+    res = await sim.send("audit cancel reason", sim.owner_id)
+    assert res["ok"], res["error"]
+
+    async with factory() as session:
+        status = (await session.get(__import__("bot.models.custom", fromlist=["Custom"]).Custom, custom_id)).status
+        assert status == CustomStatus.CANCELLED, f"custom status {status}"
+
+    assert any(
+        "لغو" in (m.get("text") or "")
+        for m in sim.session.sent
+        if str(m.get("chat_id")) == str(player_tg)
+    ), "the registered player was not notified about the cancellation"
+
+
+# --------------------------------------------------------------------------- #
+#  5. destructive admin tools: they must delete exactly what they promise
+# --------------------------------------------------------------------------- #
+
+
+async def test_cleanup_deletes_completed_orders_but_keeps_the_money(sim):
+    """«پاک‌سازی سفارش‌های تکمیل‌شده» must not touch balances or the ledger."""
+    from bot.models.order import Order, OrderStatus
+    from bot.models.user_dashboard import Transaction, TransactionType
+
+    factory = get_session_factory()
+    async with factory() as session:
+        user = await make_user(session, balance=100_000, username="cleanup_user")
+        keeper = Order(
+            user_id=user.id,
+            order_number="AUDIT-KEEP-1",
+            status=OrderStatus.APPROVED,  # not completed → must survive
+            total_amount=10_000,
+            final_amount=10_000,
+        )
+        doomed = Order(
+            user_id=user.id,
+            order_number="AUDIT-DOOM-1",
+            status=OrderStatus.COMPLETED,  # completed → must be removed
+            total_amount=10_000,
+            final_amount=10_000,
+        )
+        session.add_all([keeper, doomed])
+        await session.flush()
+        session.add(
+            Transaction(
+                user_id=user.id,
+                type=TransactionType.SPEND,
+                amount=-10_000,
+                balance_before=110_000,
+                balance_after=100_000,
+                note="audit ledger row",
+            )
+        )
+        await session.commit()
+        keeper_number, user_id = keeper.order_number, user.id
+
+    await sim.send("/start", sim.owner_id, first_name="Owner")
+    res = await sim.click("admin:cleanup", sim.owner_id)
+    assert res["ok"], res["error"]
+    res = await sim.click("admin:cleanup:orders", sim.owner_id)
+    assert res["ok"], res["error"]
+    res = await sim.click("admin:cleanup:confirm:orders", sim.owner_id)
+    assert res["ok"], res["error"]
+
+    async with factory() as session:
+        remaining = (
+            await session.execute(select(Order.order_number))
+        ).scalars().all()
+        ledger = (
+            await session.execute(select(Transaction).where(Transaction.user_id == user_id))
+        ).scalars().all()
+        balance = await get_balance(session, user_id)
+
+    assert keeper_number in remaining, "a non-completed order was deleted"
+    assert "AUDIT-DOOM-1" not in remaining, "the completed order was not deleted"
+    assert balance == 100_000, f"the cleanup changed the wallet balance: {balance}"
+    assert len(ledger) >= 1, "the financial ledger was deleted"
+
+
+async def test_cleanup_requires_the_permission(sim):
+    """A non-owner admin without DELETE_ORDERS must be refused."""
+    from bot.models.order import Order, OrderStatus
+
+    factory = get_session_factory()
+    async with factory() as session:
+        other = await make_user(session, username="plain_admin")
+        user = await make_user(session, balance=0, username="cleanup_user2")
+        order = Order(
+            user_id=user.id,
+            order_number="AUDIT-PERM-1",
+            status=OrderStatus.COMPLETED,
+            total_amount=5_000,
+            final_amount=5_000,
+        )
+        session.add(order)
+        await session.commit()
+        other_tg = other.telegram_id
+
+    await sim.send("/start", other_tg, first_name="Helper")
+    res = await sim.click("admin:cleanup:confirm:orders", other_tg)
+    assert res["ok"], res["error"]
+
+    factory = get_session_factory()
+    async with factory() as session:
+        remaining = (await session.execute(select(Order.order_number))).scalars().all()
+        assert "AUDIT-PERM-1" in remaining, (
+            "a non-admin without DELETE_ORDERS managed to delete orders"
+        )

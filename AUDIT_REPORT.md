@@ -363,7 +363,12 @@ Thank you — the crawl test and every existing suite still pass with the strict
 ```bash
 # phase-5 proof tests (admin surface + message-type switching)
 python3 -m pytest tests/audit/test_phase5_admin.py -q
-#   → 6 passed in 8.59s
+#   → 11 passed in 12.73s
+
+# admin order lifecycle (approve / transitions / logging / refund / cleanup)
+python3 -m pytest tests/audit/test_phase5_orders.py -q
+#   → 3 passed in 7.05s
+# pre-fix admin_orders.py, tests unchanged → 2 failed, 1 passed  (D11)
 # pre-fix sources, tests unchanged → 6 failed (the real Telegram error is visible:
 #   "Bad Request: there is no media in the message to edit")
 
@@ -374,12 +379,39 @@ python3 -m pytest tests/audit/test_phase4_flows.py -q
 
 # full audit suite with the stricter harness semantics
 python3 -m pytest tests/audit -q
-#   → 41 passed in 62.53s         (was 35 before this batch)
+#   → 49 passed in 70.69s         (was 41 before this batch)
 
 # repository suite on a throwaway DB
 DATABASE_URL="sqlite+aiosqlite:////tmp/repo_p5.db" python3 -m pytest tests/ -q --ignore=tests/audit
 #   → 47 passed, 3 failed — unchanged (the same three pre-existing failures)
 ```
+
+### **BUG #D11 – «✅ تایید پرداخت» on the order screen did nothing (unreachable transition)**
+**Where:** `bot/handlers/admin/admin_orders.py` — `cb_aorder_approve` (the order detail's approve button).
+
+**Symptom:** for an order waiting for review (`PAYMENT_UPLOADED`) — exactly the state in which the keyboard shows «✅ تایید پرداخت» — tapping it changed nothing. The admin saw a short alert (`انتقال غیرمجاز از payment_uploaded به approved`), the order stayed `PAYMENT_UPLOADED`, the payment stayed `PENDING`, and **no audit-log row was written** (the log line sits after the failed transition).
+
+**Root cause:** the button ran a bare `transition_to(order, APPROVED)`, but `TRANSITIONS[PAYMENT_UPLOADED]` only allows `PAYMENT_REVIEWING / CANCELLED / REJECTED`. Approving from "receipt uploaded" requires walking `uploaded → reviewing → approved` — which is precisely what the *payment* route already does (`OrderService.approve_payment` → `_advance_to`). The order route simply never used it, so the button's primary use case was a no-op.
+
+**Fix:** `cb_aorder_approve` now performs the domain operation `OrderService.approve_payment(...)`, which walks the legal steps, marks the payment record approved, and is the same code path the payment-review button uses. The shared post-transition tail (audit log + refreshed detail screen) was extracted into `_after_transition()` so both routes log and re-render identically.
+
+**Proof:** `tests/audit/test_phase5_orders.py::test_admin_approve_then_deliver_completes_the_lifecycle` (APPROVED → PREPARING → DELIVERED through the real buttons, and the payment must end APPROVED) and `::test_admin_transitions_are_logged` — both fail on the pre-fix source; the second one is what exposed the silent "no audit log" consequence.
+
+### ✅ Verified-correct (read + tested, no change needed)
+
+* **Top-up approval is safe against double-credit** (`TopUpService.approve_request`): status guard + idempotency key (`topup:<tracking_code>`, checked via `transactions.find_by_ref_id`) + user row lock (`users.get_with_lock`). Re-approving raises instead of paying twice.
+* **Admin refund pays exactly once**: `test_admin_refund_credits_the_customer_wallet` approves a card payment (wallet untouched, as a card purchase must be) and refunds it — balance becomes exactly the order amount, and a second refund tap does **not** pay again (`RefundService` guards, and the status has moved to REFUNDED).
+* **Destructive tools delete only what they promise**: `test_cleanup_deletes_completed_orders_but_keeps_the_money` — «پاک‌سازی سفارش‌های تکمیل‌شده» removes COMPLETED orders, keeps an APPROVED one, and leaves both the wallet balance and the financial ledger untouched; `test_cleanup_requires_the_permission` — a non-owner without `DELETE_ORDERS` cannot run it.
+* **Lazy-relationship class (#D8) re-checked across the admin surface**: every `.user` access in `admin_customs.py`, `admin_abuse.py`, `admin_tickets.py`, `admin_topup.py` and `admin_orders.py` is fed by a repository method that eager-loads it (`selectinload`), so no further `MissingGreenlet` crash exists there.
+
+### 🧪 Additional semantic guards added this batch
+
+`tests/audit/test_phase5_admin.py` (6 → 11) and `tests/audit/test_phase5_orders.py` (3, new):
+admin ticket reply reaches the customer and moves the status; the admin-side ticket close lands
+and drops the stale «پاسخ» button; cancelling a custom notifies every registered player; the
+admin order lifecycle (approve → prepare → deliver, payment marked approved); audit logging;
+refund single-credit; cleanup safety + permission guard. These are **regression guards** (they
+pass on today's code) — the defect-pinning proofs are the ones called out per bug above.
 
 **Still to read in this phase:** the admin handlers themselves — `admin_topup.py`
 (top-up approval, money), `admin_orders.py`, `admin_customs.py`, `admin_tickets.py`
