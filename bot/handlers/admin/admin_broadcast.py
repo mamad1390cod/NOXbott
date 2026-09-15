@@ -125,6 +125,79 @@ async def _next_step(message: Message, state: FSMContext, user: User) -> None:
     )
 
 
+@router.message(BroadcastStates.waiting_schedule)
+async def do_schedule(message: Message, uow, user: User, state: FSMContext) -> None:
+    """Persist the composed draft as a scheduled broadcast.
+
+    ``abroad:schedule`` asks the admin for a date/time and sets this state, but
+    nothing consumed the answer: the message was silently dropped and no
+    broadcast was ever created. The scheduler in ``main.py`` already ticks
+    ``BroadcastService.schedule_due`` every 45s, which sends every PENDING
+    broadcast whose ``scheduled_at`` has passed — so this handler only has to
+    store the intent.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    raw = (message.text or "").strip()
+    draft = _draft(user.telegram_id)
+
+    if not draft.get("audience", {}).get("groups"):
+        await state.clear()
+        await message.answer(
+            "❌ ابتدا مخاطب پیام را انتخاب کنید، سپس زمان‌بندی کنید.",
+            reply_markup=single_button_kb(back_button("admin:broadcast")),
+        )
+        return
+
+    now = datetime.now(timezone.utc)
+    if raw.lower() in {"now", "فوری", "الان"}:
+        when = now
+    else:
+        when = None
+        for fmt in ("%Y-%m-%d %H:%M", "%Y/%m/%d %H:%M", "%Y-%m-%d"):
+            try:
+                parsed = datetime.strptime(raw, fmt)
+            except ValueError:
+                continue
+            when = parsed.replace(tzinfo=timezone.utc)
+            break
+        if when is None:
+            await message.answer(
+                "⚠️ قالب زمان نامعتبر است. مثال: <code>2026-01-31 18:30</code> "
+                "یا بنویسید <code>now</code> برای ارسال فوری:"
+            )
+            return
+        if when < now - timedelta(minutes=1):
+            await message.answer("⚠️ زمان وارد‌شده گذشته است. یک زمان آینده بفرستید:")
+            return
+
+    b = await _persist_draft(uow, user, draft)
+    b.status = BroadcastStatus.PENDING
+    b.scheduled_at = when
+    await uow.flush()
+
+    await uow.commit()
+    api = AdminService(uow)
+    await api.log_action(
+        user, LogAction.BROADCAST_SEND, target_type="broadcast", target_id=b.id,
+        description=f"زمان‌بندی ارسال برای {when:%Y-%m-%d %H:%M}",
+    )
+    await uow.flush()
+
+    await uow.commit()
+    _DRAFTS.pop(user.telegram_id, None)
+    await state.clear()
+
+    local = when
+    await message.answer(
+        "⏰ <b>ارسال زمان‌بندی شد</b>\n\n"
+        f"🕒 زمان: {local:%Y-%m-%d %H:%M} (UTC)\n"
+        f"👥 مخاطب: {_audience_label(draft)}\n\n"
+        "در زمان مقرر به‌صورت خودکار ارسال می‌شود.",
+        reply_markup=single_button_kb(back_button("admin:broadcast")),
+    )
+
+
 # --- Audience ------------------------------------------------------------- #
 @router.callback_query(F.data.startswith("abroad:aud:"))
 async def cb_audience(callback: CallbackQuery, uow, user: User) -> None:

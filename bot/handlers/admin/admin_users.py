@@ -9,6 +9,7 @@ from aiogram.types import CallbackQuery, Message
 from bot.keyboards.admin import admin_users_keyboard, user_detail_keyboard
 from bot.keyboards.common import back_button, single_button_kb
 from bot.models.log import LogAction
+from bot.models.rbac import Permission
 from bot.models.user import User, UserRole
 from bot.services.admin import AdminService
 from bot.services.user import UserService
@@ -148,7 +149,17 @@ async def cb_user_unban(callback: CallbackQuery, uow, user: User) -> None:
 
 
 @router.callback_query(F.data.startswith("auser:makeadmin:"))
-async def cb_user_make_admin(callback: CallbackQuery, uow, user: User) -> None:
+async def cb_user_make_admin(
+    callback: CallbackQuery, uow, user: User, permissions: set[Permission]
+) -> None:
+    # This router is gated by MANAGE_USERS, but granting admin rights is the
+    # MANAGE_ADMINS power: the role defaults deliberately deny it even to
+    # SUPER_ADMIN, and RbacService.create_admin documents that "only
+    # MANAGE_ADMINS holders may call this". Without this check any moderator
+    # (MANAGE_USERS) could build an admin team of their own.
+    if Permission.MANAGE_ADMINS not in permissions:
+        await callback.answer("دسترسی مدیریت ادمین‌ها را ندارید.", show_alert=True)
+        return
     target_id = callback.data.split(":", 2)[2]
     from bot.services.rbac import RbacService
     rbac = RbacService(uow)
@@ -178,7 +189,15 @@ async def cb_user_make_admin(callback: CallbackQuery, uow, user: User) -> None:
 
 
 @router.callback_query(F.data.startswith("auser:removeadmin:"))
-async def cb_user_remove_admin(callback: CallbackQuery, uow, user: User) -> None:
+async def cb_user_remove_admin(
+    callback: CallbackQuery, uow, user: User, permissions: set[Permission]
+) -> None:
+    # Same MANAGE_ADMINS requirement as the promotion path: otherwise a
+    # moderator could strip the admin rights of a financial manager or any
+    # other role that outranks them.
+    if Permission.MANAGE_ADMINS not in permissions:
+        await callback.answer("دسترسی مدیریت ادمین‌ها را ندارید.", show_alert=True)
+        return
     target_id = callback.data.split(":", 2)[2]
     from bot.services.rbac import RbacService
     rbac = RbacService(uow)
@@ -214,6 +233,29 @@ async def cb_user_delete(callback: CallbackQuery, uow, user: User) -> None:
 @router.callback_query(F.data.startswith("auser:confirm_del:"))
 async def cb_user_confirm_delete(callback: CallbackQuery, uow, user: User) -> None:
     target_id = callback.data.split(":", 2)[2]
+
+    # Deleting a row cascades into orders/payments/registrations, so the owner
+    # and any current admin are off-limits: their access has to be revoked
+    # first (a separate, deliberate action). The owner guard mirrors the one in
+    # the "remove admin" path; without it a single tap could erase the owner
+    # account together with its financial history.
+    from bot.services.rbac import RbacService
+
+    rbac = RbacService(uow)
+    target = await uow.users.get(target_id)
+    if target is None:
+        await callback.answer("کاربر یافت نشد", show_alert=True)
+        return
+    if rbac.is_owner(target):
+        await callback.answer("مالک قابل حذف نیست", show_alert=True)
+        return
+    profile = await uow.admin_profiles.get_by_user_id(target.id)
+    if profile is not None and profile.is_active:
+        await callback.answer(
+            "ابتدا دسترسی ادمین این کاربر را بردارید.", show_alert=True
+        )
+        return
+
     us = UserService(uow)
     await us.uow.users.delete(target_id)
     await uow.flush()

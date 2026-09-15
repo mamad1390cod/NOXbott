@@ -52,8 +52,16 @@ def broadcast_audience_keyboard() -> InlineKeyboardMarkup:
 
 
 def broadcast_send_keyboard() -> InlineKeyboardMarkup:
+    """Confirm screen for a broadcast that is ready to go out.
+
+    The send button carries ``abroad:final_now`` — the handler that
+    actually resolves the audience, sends and reports the counts.
+    ``abroad:send_now`` only ever answered "ارسال شروع شد" without
+    sending anything, so this screen used to report a success that had
+    not happened.
+    """
     keyboard = [
-        [InlineKeyboardButton(text="🚀 ارسال نهایی", callback_data="abroad:send_now")],
+        [InlineKeyboardButton(text="🚀 ارسال نهایی", callback_data="abroad:final_now")],
         [InlineKeyboardButton(text="➖ توقف", callback_data="abroad:pause")],
         [InlineKeyboardButton(text="❌ لغو", callback_data="abroad:cancel")],
         [back_button("admin:broadcast")],

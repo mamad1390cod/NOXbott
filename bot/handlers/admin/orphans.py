@@ -13,6 +13,7 @@ from aiogram.types import CallbackQuery
 
 from bot.keyboards.common import back_button, single_button_kb
 from bot.models.user import User
+from bot.models.rbac import Permission
 from bot.states import BroadcastStates, SearchStates
 
 router = Router(name="admin_orphans")
@@ -42,24 +43,56 @@ async def abroad_send(callback: CallbackQuery) -> None:
 
 
 @router.callback_query(F.data == "abroad:send_now")
-async def abroad_send_now(callback: CallbackQuery, uow, user: User) -> None:
-    from bot.keyboards.broadcast import broadcast_main_keyboard
-    await safe_edit_text(callback, 
-        "✅ ارسال شروع شد. نتایج در بخش آمار قابل مشاهده است.",
-        reply_markup=broadcast_main_keyboard(),
-    )
-    await callback.answer()
+async def abroad_send_now(
+    callback: CallbackQuery, uow, user: User, state: FSMContext, permissions: set[Permission]
+) -> None:
+    """Send the composed broadcast for real.
+
+    This stub used to answer "✅ ارسال شروع شد" and do nothing at all —
+    the admin believed the audience had been messaged. The confirm screen
+    now emits ``abroad:final_now``, but already-delivered Telegram
+    messages keep their old buttons, so the payload still has to work:
+    it delegates to the one real implementation.
+    """
+    if Permission.SEND_BROADCAST not in permissions:
+        await callback.answer("دسترسی ارسال همگانی را ندارید.", show_alert=True)
+        return
+    from bot.handlers.admin.admin_broadcast import cb_final
+
+    await cb_final(callback, uow, user, state)
 
 
 @router.callback_query(F.data == "abroad:pause")
 async def abroad_pause(callback: CallbackQuery) -> None:
-    await safe_edit_text(callback, "➖ ارسال متوقف شد.", reply_markup=single_button_kb(back_button("admin:broadcast")))
+    """Honest message: this screen has no running send to pause.
+
+    The button used to claim "ارسال متوقف شد" while nothing was ever
+    running or stopped. Scheduled broadcasts are paused from their own
+    entry (BroadcastService.pause), which this screen does not own.
+    """
+    await safe_edit_text(
+        callback,
+        "⏸ ارسال در جریانی وجود ندارد که متوقف شود.\n"
+        "برای توقف یک ارسال زمان‌بندی‌شده از بخش «تاریخچه» استفاده کنید.",
+        reply_markup=single_button_kb(back_button("admin:broadcast")),
+    )
     await callback.answer()
 
 
 @router.callback_query(F.data == "abroad:cancel")
 async def abroad_cancel(callback: CallbackQuery) -> None:
-    await safe_edit_text(callback, "❌ ارسال لغو شد.", reply_markup=single_button_kb(back_button("admin:broadcast")))
+    """Discard the composed draft — that is what cancelling here means.
+
+    Previously the button only printed "ارسال لغو شد" but kept the
+    draft, so the message could still be sent later from another screen.
+    """
+    from bot.handlers.admin.admin_broadcast import _DRAFTS
+
+    _DRAFTS.pop(callback.from_user.id, None)
+    await safe_edit_text(
+        callback, "❌ پیش‌نویس لغو شد. پیامی ارسال نمی‌شود.",
+        reply_markup=single_button_kb(back_button("admin:broadcast")),
+    )
     await callback.answer()
 
 

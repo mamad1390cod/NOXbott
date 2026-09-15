@@ -324,6 +324,16 @@ Scope: the admin surface (`bot/handlers/admin/*`, ~8 200 lines) plus the shared
 editing helpers both surfaces depend on. Same method as Phase 4: read → root
 fix → one proof test per defect that **fails on the pre-fix source**.
 
+| # | Bug | Severity | Status |
+|---|-----|----------|--------|
+| D9 | Message-type switch impossible → every banner screen was un-openable | HIGH | FIXED |
+| D10 | Same silent-abort class in 4 admin raw edits | HIGH | FIXED |
+| D11 | Order screen's «تایید پرداخت» was an unreachable transition (no-op, no audit log) | HIGH | FIXED |
+| D12 | Admin rights were granted/revoked under `MANAGE_USERS` → a moderator could promote himself / demote finance | **CRITICAL** | FIXED |
+| D13 | User deletion could erase the owner account (orders/payments cascade) | **CRITICAL** | FIXED |
+| D14 | Broadcast send reported success without sending; schedule prompt had no handler | **CRITICAL** | FIXED |
+| — | Broadcast queue screen (pause/resume a scheduled broadcast) | feature | OPEN — awaiting decision |
+
 ## 🟠 HIGH
 
 ### **BUG #D9 – a message's type cannot be changed: banner screens never rendered**
@@ -369,6 +379,16 @@ python3 -m pytest tests/audit/test_phase5_admin.py -q
 python3 -m pytest tests/audit/test_phase5_orders.py -q
 #   → 3 passed in 7.05s
 # pre-fix admin_orders.py, tests unchanged → 2 failed, 1 passed  (D11)
+
+# admin user management: privilege / data-loss guards (D12, D13)
+python3 -m pytest tests/audit/test_phase5_users.py -q
+#   → 6 passed in 8.27s
+# pre-fix admin_users.py, tests unchanged → 4 failed, 2 passed
+
+# broadcast: real delivery, scheduling, cancel, permission (D14)
+python3 -m pytest tests/audit/test_phase5_broadcast.py -q
+#   → 6 passed in 9.17s
+# pre-fix sources, tests unchanged → 6 failed
 # pre-fix sources, tests unchanged → 6 failed (the real Telegram error is visible:
 #   "Bad Request: there is no media in the message to edit")
 
@@ -379,7 +399,7 @@ python3 -m pytest tests/audit/test_phase4_flows.py -q
 
 # full audit suite with the stricter harness semantics
 python3 -m pytest tests/audit -q
-#   → 49 passed in 70.69s         (was 41 before this batch)
+#   → 61 passed in 81.39s         (was 49 before this batch)
 
 # repository suite on a throwaway DB
 DATABASE_URL="sqlite+aiosqlite:////tmp/repo_p5.db" python3 -m pytest tests/ -q --ignore=tests/audit
@@ -412,6 +432,45 @@ and drops the stale «پاسخ» button; cancelling a custom notifies every regi
 admin order lifecycle (approve → prepare → deliver, payment marked approved); audit logging;
 refund single-credit; cleanup safety + permission guard. These are **regression guards** (they
 pass on today's code) — the defect-pinning proofs are the ones called out per bug above.
+
+### **BUG #D12 – privilege escalation: admin rights were gated by MANAGE_USERS**
+**Where:** `bot/handlers/admin/admin_users.py` — `cb_user_make_admin` and `cb_user_remove_admin` (router gate: `MANAGE_USERS`).
+
+**Why it is wrong:** granting *admin rights* is the `MANAGE_ADMINS` power, and the codebase says so twice: `ROLE_DEFAULTS` deliberately strips `MANAGE_ADMINS` even from `SUPER_ADMIN`, and `RbacService.create_admin`'s docstring states "Only MANAGE_ADMINS holders may call this (checked by the caller/handler)" — but the caller was gated by `MANAGE_USERS`.
+
+**Impact:** the built-in `MODERATOR` role holds `MANAGE_USERS` but not `MANAGE_ADMINS`, so any moderator could promote arbitrary accounts (e.g. a second account of their own) to moderator and — worse — **strip admin rights from a financial manager or any role that outranks them**, blocking payments and refunds.
+
+**Fix:** both handlers now require `Permission.MANAGE_ADMINS` (owner unaffected: the owner's effective set is all permissions), using the same in-handler pattern already used by `admin_cleanup`.
+
+**Proof:** `tests/audit/test_phase5_users.py::test_moderator_cannot_promote_a_user_to_admin` and `::test_moderator_cannot_demote_another_admin` both fail on the pre-fix source, and `::test_owner_can_still_manage_admins` proves the legitimate path still works.
+
+### **BUG #D13 – deleting a user could erase the owner account and its financial history**
+**Where:** `bot/handlers/admin/admin_users.py` — `cb_user_confirm_delete`.
+
+**Why it is wrong:** the handler deleted *any* user id with no guard, while the neighbouring "remove admin" path explicitly protects the owner. FKs cascade (`orders.user_id`, `payments.user_id`, carts, registrations → `ondelete="CASCADE"`), so one confirmed tap could delete the owner row **and their orders/payments with it**.
+
+**Fix:** the owner cannot be deleted (same message as the admin path), and an account holding an **ACTIVE** admin profile must have that access revoked first — a separate, deliberate action.
+
+**Proof:** `test_owner_account_cannot_be_deleted` and `test_active_admin_cannot_be_deleted` fail pre-fix (the row disappears), while `test_plain_customer_can_still_be_deleted` proves the normal case is untouched.
+
+### **BUG #D14 – the broadcast send screen reported a success that never happened**
+**Where:** `bot/keyboards/broadcast.py::broadcast_send_keyboard`, `bot/handlers/admin/orphans.py` (`abroad:send_now`, `abroad:pause`, `abroad:cancel`), `bot/handlers/admin/admin_broadcast.py` (missing `waiting_schedule` handler).
+
+**Symptoms (three, same root: stub handlers claiming real actions):**
+1. broadcast menu → «🚀 ارسال» → «🚀 ارسال نهایی» answered **"✅ ارسال شروع شد"** and sent nothing; the admin believed the whole audience had been messaged;
+2. «⏰ زمانبندی» asked for a date, set `BroadcastStates.waiting_schedule` — and **nothing consumed that state**, so the admin's answer vanished while the broadcast was never created (the project *does* run a working scheduler: `main.py` ticks `BroadcastService.schedule_due()` every 45s);
+3. «➖ توقف» / «❌ لغو» printed "متوقف شد"/"لغو شد" without pausing or cancelling anything — the draft even survived "cancel".
+
+**Fix (wired to the existing service layer, no new machinery):**
+* the confirm screen's send button now carries `abroad:final_now`, the handler that really resolves the audience, sends, logs and reports the counts;
+* `abroad:send_now` — which stays in already-delivered Telegram messages — delegates to that same handler behind a `SEND_BROADCAST` check (this router is gated by `VIEW_DASHBOARD`, so a viewer could otherwise trigger it);
+* a real `waiting_schedule` handler parses `YYYY-MM-DD HH:MM` (also `now`, plus a past-date guard and an invalid-format retry) and stores the draft as `PENDING` with `scheduled_at`, which is exactly what the live scheduler picks up;
+* «لغو» now actually discards the draft (so it cannot be sent later from another screen) and «توقف» states honestly that there is no running send to pause, pointing to the history section.
+
+**Proof:** `tests/audit/test_phase5_broadcast.py` — all six tests fail on the pre-fix sources: real delivery to every target with `status=SENT`/`sent_count`, the legacy button working, the schedule persisting `PENDING` + the admin's date, invalid/past dates refused with a retry, cancel discarding the draft, and a viewer without `SEND_BROADCAST` being refused.
+
+### 📋 OPEN — broadcast queue management screen (feature, needs your go-ahead)
+`BroadcastService` already exposes `pause`, `resume`, `cancel` and `schedule_due`, but no screen lists the pending/scheduled broadcasts and lets an admin act on one (with its id). Today «توقف» can only be honest about having nothing to pause. Building that screen is a feature, not a bug fix — left untouched pending your decision.
 
 **Still to read in this phase:** the admin handlers themselves — `admin_topup.py`
 (top-up approval, money), `admin_orders.py`, `admin_customs.py`, `admin_tickets.py`
