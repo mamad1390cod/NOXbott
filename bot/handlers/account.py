@@ -15,6 +15,7 @@ from bot.services.cart import CartService
 from bot.states import AccountInfoStates
 from bot.utils.editing import safe_edit_text
 from bot.utils.format import format_price
+from bot.utils.messages import require_text
 
 router = Router(name="account")
 
@@ -31,7 +32,9 @@ async def collect_codm_username(
     uow, user,
 ) -> None:
     """Collect CODM username."""
-    codm_username = message.text.strip()
+    codm_username = await require_text(message, "⚠️ لطفاً نام کاربری CODM را متنی بفرستید:")
+    if codm_username is None:
+        return
     if not codm_username:
         await message.answer("⚠️ لطفاً یک نام کاربری معتبر وارد کنید:")
         return
@@ -51,7 +54,9 @@ async def collect_email(
     uow, user,
 ) -> None:
     """Collect email address."""
-    email = message.text.strip()
+    email = await require_text(message, "⚠️ لطفاً ایمیل را متنی بفرستید:")
+    if email is None:
+        return
     if not email or "@" not in email:
         await message.answer("⚠️ ایمیل معتبر نیست. مثال: example@mail.com")
         return
@@ -68,7 +73,9 @@ async def collect_password(
     uow, user,
 ) -> None:
     """Collect password."""
-    password = message.text.strip()
+    password = await require_text(message, "⚠️ لطفاً رمز عبور را متنی بفرستید:")
+    if password is None:
+        return
     if not password:
         await message.answer("⚠️ رمز عبور را وارد کنید:")
         return

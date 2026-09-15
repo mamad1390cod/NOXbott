@@ -1119,6 +1119,10 @@ async def collect_postpone_time(message: Message, state: FSMContext, uow, user: 
     new_date = data.get("postpone_new_date")
     
     new_time = None
+    if message.text is None:
+        # A photo/sticker must not crash the wizard: ask for the time again.
+        await message.answer("⚠️ لطفاً ساعت را متنی بفرستید (HH:MM) یا /skip را بزنید.")
+        return
     if message.text != "/skip":
         new_time = message.text.strip()
         # Basic validation

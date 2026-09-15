@@ -16,6 +16,7 @@ from bot.services import reporting
 from bot.states import FinancialStates
 from bot.utils.format import format_price
 from bot.utils.editing import safe_edit_text
+from bot.utils.messages import require_text
 
 router = Router(name="admin_finance")
 logger = logging.getLogger(__name__)
@@ -85,7 +86,8 @@ async def cb_finance_home(callback: CallbackQuery, uow, user: User) -> None:
 @router.callback_query(F.data == "fin:clear")
 async def cb_finance_clear(callback: CallbackQuery, uow, user: User) -> None:
     _ACTIVE_FILTERS[user.telegram_id] = {}
-    await callback.answer("فیلتر پاک شد")
+    # cb_finance_home answers the callback; answering here too made Telegram
+    # reject the second call.
     await cb_finance_home(callback, uow, user)
 
 
@@ -106,7 +108,9 @@ async def cb_f_date(callback: CallbackQuery, state: FSMContext) -> None:
 @router.message(FinancialStates.waiting_date_from)
 async def do_date_from(message: Message, state: FSMContext, uow, user: User) -> None:
     from datetime import datetime as _dt
-    raw = message.text.strip()
+    raw = await require_text(message)
+    if raw is None:
+        return
     try:
         _dt.strptime(raw, "%Y-%m-%d")
     except ValueError:
@@ -120,13 +124,19 @@ async def do_date_from(message: Message, state: FSMContext, uow, user: User) -> 
 @router.message(FinancialStates.waiting_date_to)
 async def do_date_to(message: Message, state: FSMContext, uow, user: User) -> None:
     from datetime import datetime as _dt
-    raw = message.text.strip()
+    raw = await require_text(message)
+    if raw is None:
+        return
     try:
         _dt.strptime(raw, "%Y-%m-%d")
     except ValueError:
         await message.answer("⚠️ فرمت اشتباه. مثال: 2026-08-31")
         return
     data = await state.get_data()
+    if "date_from" not in data:
+        await state.clear()
+        await message.answer("⚠️ مرحله قبل کامل نشد. دوباره از منوی فیلتر شروع کنید.")
+        return
     f = _ACTIVE_FILTERS.setdefault(user.telegram_id, {})
     f["date_from"] = data["date_from"]
     f["date_to"] = raw
@@ -144,7 +154,10 @@ async def cb_f_user(callback: CallbackQuery, state: FSMContext) -> None:
 @router.message(FinancialStates.waiting_user)
 async def do_user(message: Message, state: FSMContext, uow, user: User) -> None:
     from bot.services.user import UserService
-    users = await UserService(uow).search_users(message.text.strip(), limit=1)
+    query = await require_text(message)
+    if query is None:
+        return
+    users = await UserService(uow).search_users(query, limit=1)
     if not users:
         await message.answer("❌ کاربری یافت نشد.")
         await state.clear()
@@ -165,8 +178,11 @@ async def cb_f_product(callback: CallbackQuery, state: FSMContext) -> None:
 
 @router.message(FinancialStates.waiting_product)
 async def do_product(message: Message, state: FSMContext, uow, user: User) -> None:
+    raw = await require_text(message)
+    if raw is None:
+        return
     f = _ACTIVE_FILTERS.setdefault(user.telegram_id, {})
-    f["t_product"] = message.text.strip()
+    f["t_product"] = raw
     await state.clear()
     await message.answer("✅ فیلتر محصول اعمال شد.", reply_markup=single_button_kb(back_button("fin:home")))
 
@@ -181,8 +197,11 @@ async def cb_f_category(callback: CallbackQuery, state: FSMContext) -> None:
 
 @router.message(FinancialStates.waiting_category)
 async def do_category(message: Message, state: FSMContext, uow, user: User) -> None:
+    raw = await require_text(message)
+    if raw is None:
+        return
     f = _ACTIVE_FILTERS.setdefault(user.telegram_id, {})
-    f["t_product"] = message.text.strip()  # reuse product filter by name
+    f["t_product"] = raw  # reuse product filter by name
     await state.clear()
     await message.answer("✅ فیلتر دسته اعمال شد.", reply_markup=single_button_kb(back_button("fin:home")))
 
@@ -196,8 +215,15 @@ async def cb_f_payment(callback: CallbackQuery, state: FSMContext) -> None:
 
 @router.message(FinancialStates.waiting_payment_status)
 async def do_payment(message: Message, state: FSMContext, uow, user: User) -> None:
+    raw = await require_text(message)
+    if raw is None:
+        return
+    raw = raw.lower()
+    if raw not in {"pending", "approved", "rejected"}:
+        await message.answer("⚠️ یکی از این‌ها را بفرستید: pending / approved / rejected")
+        return
     f = _ACTIVE_FILTERS.setdefault(user.telegram_id, {})
-    f["payment_status"] = message.text.strip().lower()
+    f["payment_status"] = raw
     await state.clear()
     await message.answer("✅ اعمال شد.", reply_markup=single_button_kb(back_button("fin:home")))
 
@@ -211,8 +237,11 @@ async def cb_f_admin(callback: CallbackQuery, state: FSMContext) -> None:
 
 @router.message(FinancialStates.waiting_admin)
 async def do_admin(message: Message, state: FSMContext, uow, user: User) -> None:
+    raw = await require_text(message)
+    if raw is None:
+        return
     f = _ACTIVE_FILTERS.setdefault(user.telegram_id, {})
-    f["t_admin"] = message.text.strip()
+    f["t_admin"] = raw
     await state.clear()
     await message.answer("✅ فیلتر ادمین اعمال شد.", reply_markup=single_button_kb(back_button("fin:home")))
 

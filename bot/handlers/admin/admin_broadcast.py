@@ -21,6 +21,7 @@ from bot.models.user import User
 from bot.services.admin import AdminService
 from bot.services.broadcast import BroadcastService
 from bot.states import BroadcastStates
+from bot.utils.messages import require_text
 
 router = Router(name="admin_broadcast")
 logger = logging.getLogger(__name__)
@@ -78,8 +79,11 @@ async def cb_type(callback: CallbackQuery, state: FSMContext) -> None:
 
 @router.message(BroadcastStates.waiting_text)
 async def do_text(message: Message, state: FSMContext, uow, user: User) -> None:
+    text = await require_text(message)
+    if text is None:
+        return
     draft = _draft(user.telegram_id)
-    draft["text"] = message.text.strip()
+    draft["text"] = text
     await _next_step(message, state, user)
 
 
@@ -92,23 +96,32 @@ async def do_photo(message: Message, state: FSMContext, user: User) -> None:
 
 @router.message(BroadcastStates.waiting_caption)
 async def do_caption(message: Message, state: FSMContext, user: User) -> None:
+    caption = await require_text(message, "کپشن را متنی بفرستید یا /skip را بزنید:")
+    if caption is None:
+        return
     draft = _draft(user.telegram_id)
-    draft["caption"] = "" if message.text.strip() == "/skip" else message.text.strip()
+    draft["caption"] = "" if caption == "/skip" else caption
     await _next_step(message, state, user)
 
 
 @router.message(BroadcastStates.waiting_poll_question)
 async def do_poll_q(message: Message, state: FSMContext, user: User) -> None:
+    question = await require_text(message)
+    if question is None:
+        return
     draft = _draft(user.telegram_id)
-    draft["poll"] = {"question": message.text.strip(), "options": []}
+    draft["poll"] = {"question": question, "options": []}
     await state.set_state(BroadcastStates.waiting_poll_options)
     await message.answer("گزینه‌ها را با خط جدید جدا کنید (هر خط یک گزینه):")
 
 
 @router.message(BroadcastStates.waiting_poll_options)
 async def do_poll_opts(message: Message, state: FSMContext, user: User) -> None:
+    raw = await require_text(message)
+    if raw is None:
+        return
     draft = _draft(user.telegram_id)
-    options = [line.strip() for line in message.text.splitlines() if line.strip()]
+    options = [line.strip() for line in raw.splitlines() if line.strip()]
     draft["poll"]["options"] = options
     await _next_step(message, state, user)
 

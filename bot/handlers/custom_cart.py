@@ -16,6 +16,7 @@ from bot.services.payment import PaymentService
 from bot.states import CustomCartStates
 from bot.utils.editing import safe_edit_text
 from bot.utils.format import format_price
+from bot.utils.messages import require_text
 
 router = Router(name="custom_cart")
 logger = logging.getLogger(__name__)
@@ -152,7 +153,9 @@ async def collect_codm_username(
     uow, user: User,
     state: FSMContext,
 ) -> None:
-    username = message.text.strip()
+    username = await require_text(message)
+    if username is None:
+        return
     if not username or len(username) > 100:
         await message.answer("⚠️ لطفاً یک نام کاربری معتبر (حداکثر 100 کاراکتر) وارد کنید:")
         return

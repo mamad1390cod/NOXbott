@@ -15,6 +15,7 @@ from bot.services.notification import NotificationService
 from bot.services.ticket import TicketService
 from bot.states import TicketStates
 from bot.texts import TICKET_CREATED
+from bot.utils.messages import require_text
 
 router = Router(name="support")
 
@@ -73,7 +74,9 @@ async def collect_ticket_message(
     uow, user: User,
     state: FSMContext,
 ) -> None:
-    msg = message.text.strip()
+    msg = await require_text(message)
+    if msg is None:
+        return
     if not msg:
         await message.answer("⚠️ لطفاً متن پیام را بنویسید:")
         return
@@ -227,10 +230,13 @@ async def user_ticket_reply(
         await message.answer("❌ این تیکت بسته شده است.")
         await state.clear()
         return
+    reply_text = await require_text(message)
+    if reply_text is None:
+        return
     await ticket_service.reply_to_ticket(
         ticket_id=ticket_id,
         user_id=user.id,
-        message=message.text.strip(),
+        message=reply_text,
         is_admin=False,
     )
     await uow.flush()

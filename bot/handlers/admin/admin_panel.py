@@ -14,6 +14,7 @@ from bot.models.user import User
 from bot.services.admin import AdminService
 from bot.utils.format import format_price
 from bot.utils.editing import safe_edit_text
+from bot.utils.messages import require_text
 
 router = Router(name="admin_panel")
 logger = logging.getLogger(__name__)
@@ -55,7 +56,9 @@ def admin_login_ready_keyboard() -> types.InlineKeyboardMarkup:
 
 @router.message(AdminLoginStates.waiting_password)
 async def check_admin_password(message: Message, state: FSMContext, uow, user: User) -> None:
-    password = message.text.strip()
+    password = await require_text(message, "🔑 لطفاً رمز عبور را متنی بفرستید:")
+    if password is None:
+        return
     settings = get_settings()
     if password == settings.admin_password:
         await state.clear()

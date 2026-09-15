@@ -22,6 +22,7 @@ from bot.models.discount_code import DiscountType
 from bot.services.discount_code import DiscountCodeService
 from bot.states import AdminDiscountCodeStates
 from bot.utils.editing import safe_edit_text
+from bot.utils.messages import require_text
 from bot.utils.format import format_price
 
 router = Router(name="admin_discounts")
@@ -280,7 +281,10 @@ async def process_discount_code_input(
     message: Message, state: FSMContext, uow, user
 ) -> None:
     """Process discount code input."""
-    code = message.text.strip().upper()
+    code = await require_text(message)
+    if code is None:
+        return
+    code = code.upper()
     
     if len(code) < 3:
         await message.answer("❌ کد تخفیف باید حداقل ۳ کاراکتر باشد. لطفاً دوباره وارد کنید:")
@@ -341,8 +345,11 @@ async def cb_admin_discount_type(callback: CallbackQuery, state: FSMContext, uow
 @router.message(AdminDiscountCodeStates.waiting_value)
 async def process_discount_value(message: Message, state: FSMContext, uow, user) -> None:
     """Process discount value input."""
+    raw = await require_text(message)
+    if raw is None:
+        return
     try:
-        value = int(message.text.strip())
+        value = int(raw)
     except ValueError:
         await message.answer("❌ لطفاً یک عدد صحیح وارد کنید:")
         return
@@ -388,8 +395,11 @@ async def process_discount_value(message: Message, state: FSMContext, uow, user)
 @router.message(AdminDiscountCodeStates.waiting_max_eligible)
 async def process_max_eligible(message: Message, state: FSMContext, uow, user) -> None:
     """Process max eligible amount input."""
+    raw = await require_text(message)
+    if raw is None:
+        return
     try:
-        amount = int(message.text.strip())
+        amount = int(raw)
         if amount < 1:
             await message.answer("❌ مبلغ باید بیشتر از صفر باشد. لطفاً دوباره وارد کنید:")
             return
@@ -442,7 +452,9 @@ async def cb_skip_max_eligible(callback: CallbackQuery, state: FSMContext, uow, 
 @router.message(AdminDiscountCodeStates.waiting_expiration)
 async def process_expiration(message: Message, state: FSMContext, uow, user) -> None:
     """Process expiration date input."""
-    date_str = message.text.strip()
+    date_str = await require_text(message)
+    if date_str is None:
+        return
     
     try:
         # Parse datetime in format YYYY-MM-DD HH:MM
@@ -499,8 +511,11 @@ async def cb_skip_expiration(callback: CallbackQuery, state: FSMContext, uow, us
 @router.message(AdminDiscountCodeStates.waiting_max_uses)
 async def process_max_uses(message: Message, state: FSMContext, uow, user) -> None:
     """Process max uses input."""
+    raw = await require_text(message)
+    if raw is None:
+        return
     try:
-        max_uses = int(message.text.strip())
+        max_uses = int(raw)
         if max_uses < 1:
             await message.answer("❌ تعداد باید بیشتر از صفر باشد. لطفاً دوباره وارد کنید:")
             return
@@ -549,7 +564,9 @@ async def cb_skip_max_uses(callback: CallbackQuery, state: FSMContext, uow, user
 @router.message(AdminDiscountCodeStates.waiting_description)
 async def process_description(message: Message, state: FSMContext, uow, user) -> None:
     """Process description input and create discount code."""
-    description = message.text.strip()
+    description = await require_text(message)
+    if description is None:
+        return
     await state.update_data(description=description)
     await _create_discount_code(message, state, uow, user)
 

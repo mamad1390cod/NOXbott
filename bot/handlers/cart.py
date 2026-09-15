@@ -10,6 +10,7 @@ from bot.services.order import OrderService
 from bot.states import DiscountCodeStates
 from bot.utils.format import format_price
 from bot.utils.editing import safe_edit_text
+from bot.utils.messages import require_text
 
 router = Router(name="cart")
 
@@ -300,7 +301,9 @@ async def process_discount_code(
     """Process discount code entered by user."""
     from bot.services.cart import CartService
     
-    code = message.text.strip()
+    code = await require_text(message)
+    if code is None:
+        return
     
     if not code:
         await message.answer("❌ کد تخفیف نمی‌تواند خالی باشد. لطفاً دوباره تلاش کنید:")

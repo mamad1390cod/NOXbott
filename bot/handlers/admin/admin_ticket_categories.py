@@ -11,6 +11,7 @@ from bot.services.ticket import TicketService
 from bot.states import AdminTicketCategoryStates
 from bot.utils.editing import safe_edit_text
 from bot.utils.format import format_price
+from bot.utils.messages import require_text
 
 router = Router(name="admin_ticket_categories")
 logger = logging.getLogger(__name__)
@@ -82,7 +83,9 @@ async def cb_ticket_category_add_start(callback: CallbackQuery, state: FSMContex
 @router.message(AdminTicketCategoryStates.waiting_name)
 async def collect_ticket_category_name(message: Message, state: FSMContext) -> None:
     """Collect category name."""
-    name = message.text.strip()
+    name = await require_text(message)
+    if name is None:
+        return
     if not name or len(name) > 255:
         await message.answer("⚠️ نام نامعتبر است. دوباره وارد کنید:")
         return

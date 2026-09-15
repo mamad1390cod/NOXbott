@@ -337,6 +337,9 @@ fix → one proof test per defect that **fails on the pre-fix source**.
 | D17 | Settings editor ignored the value type → any key could be overwritten | HIGH | FIXED |
 | D18 | Boolean toggle answered the same callback twice | LOW | FIXED |
 | — | Broadcast queue screen (pause/resume a scheduled broadcast) | feature | OPEN — awaiting decision |
+| D19 | 15 wizard handlers crashed on a photo/sticker where text was expected | MEDIUM | FIXED |
+| D20 | Financial filters: «تا» drops the last day, and product/category/admin/payment filters are inert | HIGH | OPEN — needs approval |
+| — | Line-ending noise: orphans.py restored to the file's original CRLF convention | — | FIXED |
 | — | Router-gated callbacks are never answered (client spinner) | MEDIUM | OPEN — awaiting decision |
 
 ## 🟠 HIGH
@@ -404,6 +407,15 @@ python3 -m pytest tests/audit/test_phase5_roles.py -q
 python3 -m pytest tests/audit/test_phase5_settings.py -q
 #   → 7 passed in 10.82s
 # pre-fix admin_settings.py, tests unchanged → 5 failed, 2 passed
+
+# non-text replies crash wizards — class fixed across both surfaces (D19)
+python3 -m pytest tests/audit/test_phase5_input_guards.py -q
+#   → 5 passed in 7.88s
+# pre-fix handlers, tests unchanged → 5 failed (16 unguarded sites)
+
+# financial filters: sanity + two proven OPEN defects (D20)
+python3 -m pytest tests/audit/test_phase5_finance.py -q
+#   → 1 passed, 2 xfailed in 6.22s
 # pre-fix sources, tests unchanged → 6 failed (the real Telegram error is visible:
 #   "Bad Request: there is no media in the message to edit")
 
@@ -414,7 +426,7 @@ python3 -m pytest tests/audit/test_phase4_flows.py -q
 
 # full audit suite with the stricter harness semantics
 python3 -m pytest tests/audit -q
-#   → 75 passed in 96.25s         (was 68 before this batch)
+#   → 81 passed, 2 xfailed in 103.28s   (was 75 before this batch)
 
 # repository suite on a throwaway DB
 DATABASE_URL="sqlite+aiosqlite:////tmp/repo_p5.db" python3 -m pytest tests/ -q --ignore=tests/audit
@@ -531,6 +543,26 @@ When `IsAdmin`/`HasPermission` rejects a callback, aiogram simply finds no handl
 **Fix:** `cb_view` gained an already-answered mode (`answer=False`); the toggle answers once.
 
 **Proof:** `test_boolean_toggle_works_and_answers_once` counts the `AnswerCallbackQuery` calls of the single tap (2 pre-fix, 1 post-fix) and also asserts the value flipped, the audit entry was written and the fresh screen shows the new state.
+
+### **BUG #D19 – every wizard crashed if the reply was not text (15 handlers)**
+**Where:** 11 files — `admin_orders.py` (9 sites: number/user/price/date filters, order search, reject reason, cancel reason, internal note, ticket link), `admin_panel.py` (admin password), `admin_ticket_categories.py`, `admin_finance.py` (7 sites), `admin_broadcast.py` (4), `admin_membership.py` (4), `admin_customs.py`, and on the customer side `account.py`, `cart.py` (discount code), `custom_cart.py`, `support.py` (2).
+
+**Symptom:** a wizard state asks for a value and the handler does `message.text.strip()`. A photo, sticker, voice note or document arrives with `message.text is None` → `AttributeError: 'NoneType' object has no attribute 'strip'`. Nothing is answered, the exception goes to the log, the state stays armed, and the user is stuck with a bot that "ignores" them (admins could not exit the filter dialogs except by pressing a button).
+
+**Fix (one shared helper + a structural guard):** `bot/utils/messages.require_text()` returns the trimmed text or answers "لطفاً پاسخ را بهصورت متن ارسال کنید:" and returns `None` so the handler returns early — the state stays armed and the retry works. All 15 sites use it. The `admin_finance` payment-status filter now also validates its three legal values instead of accepting any string. `bot/filters` magic-filter expressions (`F.text.lower()` etc., which can only match when text exists) are explicitly out of scope.
+
+**Proof:** `tests/audit/test_phase5_input_guards.py` — `test_every_handler_guards_message_text` walks `bot/handlers/**` with `ast` and fails on any unguarded dereference (16 sites on the pre-fix tree), plus three behavioural tests that feed a real photo into the order-filter, finance-date and customer-discount wizards and prove the prompt appears, no exception is raised and the real answer still lands. All five fail on the pre-fix sources.
+
+### **BUG #D18b – «پاک کردن فیلتر» in the financial dashboard answered twice**
+Same class as D18: `cb_finance_clear` called `callback.answer("فیلتر پاک شد")` and then re-rendered via `cb_finance_home`, which answers as well — Telegram rejects the second answer. Now only the renderer answers. `test_finance_clear_answers_once` fails pre-fix (2 answers) and passes post-fix (1).
+
+### 📋 OPEN — financial filters (needs your approval: this is reporting/payment logic)
+Two defects proven by tests, **deliberately not fixed yet** because they change financial reporting semantics:
+
+1. **The «تا تاریخ» bound drops the whole last day.** The handler stores the admin's text as `"YYYY-MM-DD"` and `FinanceRepository._paid_stmt` compares it against the `paid_at` *datetime*: `paid_at <= '2026-01-31'` is false for anything that happened on 2026-01-31 (the string only equals midnight). So a range that includes the day itself silently excludes it.
+2. **Product / category / admin / payment-status filters are inert.** The UI confirms «✅ فیلتر محصول اعمال شد» and the dashboard prints «📦 محصول: X», but `_paid_stmt` only honours date / `user_id` / `admin_id`: every number stays unfiltered. An admin reading a "filtered" financial report is reading the unfiltered one.
+
+Both are recorded as `xfail(strict=True)` in `tests/audit/test_phase5_finance.py` (`test_date_filter_includes_the_last_day`, `test_product_filter_actually_filters`) — they fail today, and if someone fixes the behaviour the suite will fail loudly so the marker is removed deliberately. The fix is small (parse the dates into `date_to = end-of-day`; apply product/admin/payment joins), but it changes what the numbers mean → awaiting your go-ahead.
 
 **Still to read in this phase:** the admin handlers themselves — `admin_topup.py`
 (top-up approval, money), `admin_orders.py`, `admin_customs.py`, `admin_tickets.py`

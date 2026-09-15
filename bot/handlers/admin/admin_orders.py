@@ -31,6 +31,7 @@ from bot.services.user import UserService
 from bot.states import AdminDeliveryStates, AdminOrderStates
 from bot.utils.editing import safe_edit_text
 from bot.utils.format import format_price
+from bot.utils.messages import require_text
 
 router = Router(name="admin_orders")
 logger = logging.getLogger(__name__)
@@ -208,8 +209,11 @@ async def cb_aorder_f_number(callback: CallbackQuery, state: FSMContext) -> None
 
 @router.message(AdminOrderStates.waiting_filter_number)
 async def do_filter_number(message: Message, state: FSMContext, uow, user: User) -> None:
+    raw = await require_text(message)
+    if raw is None:
+        return
     f = _ACTIVE_FILTERS.setdefault(user.telegram_id, {})
-    f["order_number"] = message.text.strip()
+    f["order_number"] = raw
     await state.clear()
     await message.answer("✅ فیلتر شماره اعمال شد.", reply_markup=single_button_kb(back_button("aorder:filter")))
 
@@ -223,7 +227,9 @@ async def cb_aorder_f_user(callback: CallbackQuery, state: FSMContext) -> None:
 
 @router.message(AdminOrderStates.waiting_filter_user)
 async def do_filter_user(message: Message, state: FSMContext, uow, user: User) -> None:
-    query = message.text.strip()
+    query = await require_text(message)
+    if query is None:
+        return
     us = UserService(uow)
     users = await us.search_users(query, limit=1)
     if not users:
@@ -258,7 +264,9 @@ async def cb_aorder_f_price(callback: CallbackQuery, state: FSMContext) -> None:
 
 @router.message(AdminOrderStates.waiting_filter_price)
 async def do_filter_price(message: Message, state: FSMContext, uow, user: User) -> None:
-    raw = message.text.strip()
+    raw = await require_text(message)
+    if raw is None:
+        return
     try:
         if "-" in raw:
             lo, hi = raw.split("-", 1)
@@ -284,7 +292,9 @@ async def cb_aorder_f_date(callback: CallbackQuery, state: FSMContext) -> None:
 
 @router.message(AdminOrderStates.waiting_filter_date)
 async def do_filter_date(message: Message, state: FSMContext, uow, user: User) -> None:
-    raw = message.text.strip()
+    raw = await require_text(message)
+    if raw is None:
+        return
     from datetime import datetime as _dt
     data = await state.get_data()
     raw_from = data.get("filter_date_from", "")
@@ -322,7 +332,9 @@ async def cb_aorder_search(callback: CallbackQuery, state: FSMContext) -> None:
 
 @router.message(AdminOrderStates.waiting_search_number)
 async def do_search_order_number(message: Message, state: FSMContext, uow, user: User) -> None:
-    query = message.text.strip()
+    query = await require_text(message)
+    if query is None:
+        return
     os = OrderService(uow)
     order = await os.get_order_by_number(query)
     await state.clear()
@@ -627,13 +639,16 @@ async def cb_aorder_reject(callback: CallbackQuery, uow, user: User, state: FSMC
 
 @router.message(AdminOrderStates.waiting_reject_reason)
 async def do_reject(message: Message, state: FSMContext, uow, user: User) -> None:
+    note = await require_text(message)
+    if note is None:
+        return
     data = await state.get_data()
     order = await OrderService(uow).get_order(data.get("order_id"))
     await state.clear()
     if not order:
         return
     await _transition_message(message, uow, user, order,
-                              OrderStatus.REJECTED, note=message.text.strip())
+                              OrderStatus.REJECTED, note=note)
 
 
 @router.callback_query(F.data.startswith("aorder:cancel:"))
@@ -649,13 +664,16 @@ async def cb_aorder_cancel(callback: CallbackQuery, uow, user: User, state: FSMC
 
 @router.message(AdminOrderStates.waiting_cancel_reason)
 async def do_cancel(message: Message, state: FSMContext, uow, user: User) -> None:
+    note = await require_text(message)
+    if note is None:
+        return
     data = await state.get_data()
     order = await OrderService(uow).get_order(data.get("order_id"))
     await state.clear()
     if not order:
         return
     await _transition_message(message, uow, user, order,
-                              OrderStatus.CANCELLED, note=message.text.strip())
+                              OrderStatus.CANCELLED, note=note)
 
 
 @router.callback_query(F.data.startswith("aorder:refund:"))
@@ -750,9 +768,12 @@ async def cb_aorder_note(callback: CallbackQuery, state: FSMContext) -> None:
 
 @router.message(AdminOrderStates.waiting_note)
 async def do_note(message: Message, state: FSMContext, uow, user: User) -> None:
+    note = await require_text(message)
+    if note is None:
+        return
     data = await state.get_data()
     os = OrderService(uow)
-    await os.set_internal_note(data["order_id"], message.text.strip(), admin=user)
+    await os.set_internal_note(data["order_id"], note, admin=user)
     await uow.flush()
 
     await uow.commit()
@@ -776,9 +797,11 @@ async def cb_aorder_ticket(callback: CallbackQuery, state: FSMContext) -> None:
 
 @router.message(AdminOrderStates.waiting_ticket_link)
 async def do_link_ticket(message: Message, state: FSMContext, uow, user: User) -> None:
+    raw = await require_text(message)
+    if raw is None:
+        return
     data = await state.get_data()
     os = OrderService(uow)
-    raw = message.text.strip()
     if raw.lower() == "/none":
         await os.unlink_ticket(data["order_id"])
         await uow.flush()

@@ -9,6 +9,7 @@ from bot.keyboards.common import back_button
 from bot.services.mandatory_membership import MandatoryMembershipService
 from bot.states import MandatoryMembershipStates
 from bot.utils.editing import safe_edit_text
+from bot.utils.messages import require_text
 
 router = Router(name="admin_membership")
 
@@ -58,14 +59,19 @@ async def cb_add(callback: CallbackQuery, state: FSMContext) -> None:
 
 @router.message(MandatoryMembershipStates.waiting_title)
 async def add_title(message: Message, state: FSMContext) -> None:
-    await state.update_data(title=message.text.strip())
+    title = await require_text(message)
+    if title is None:
+        return
+    await state.update_data(title=title)
     await state.set_state(MandatoryMembershipStates.waiting_chat_id)
     await message.answer("شناسه عددی کانال/گروه را ارسال کنید (مثلاً -1001234567890):")
 
 
 @router.message(MandatoryMembershipStates.waiting_chat_id)
 async def add_chat_id(message: Message, state: FSMContext) -> None:
-    chat_id = message.text.strip()
+    chat_id = await require_text(message)
+    if chat_id is None:
+        return
     if not (chat_id.lstrip("-").isdigit()):
         await message.answer("شناسه باید عددی باشد:")
         return
@@ -76,7 +82,9 @@ async def add_chat_id(message: Message, state: FSMContext) -> None:
 
 @router.message(MandatoryMembershipStates.waiting_link)
 async def add_link(message: Message, state: FSMContext, uow: UnitOfWork) -> None:
-    link = message.text.strip()
+    link = await require_text(message)
+    if link is None:
+        return
     if not link.startswith(("https://t.me/", "http://t.me/", "https://telegram.me/")):
         await message.answer("لینک معتبر تلگرام ارسال کنید:")
         return
@@ -130,7 +138,10 @@ async def cb_edit(
 
 @router.message(MandatoryMembershipStates.waiting_edit)
 async def do_edit(message: Message, state: FSMContext, uow: UnitOfWork) -> None:
-    parts = [part.strip() for part in message.text.split("|")]
+    raw = await require_text(message)
+    if raw is None:
+        return
+    parts = [part.strip() for part in raw.split("|")]
     valid_link = parts[2].startswith(
         ("https://t.me/", "http://t.me/", "https://telegram.me/")
     ) if len(parts) == 3 else False
