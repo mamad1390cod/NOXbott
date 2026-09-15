@@ -2,6 +2,7 @@
 
 import logging
 import tempfile
+from pathlib import Path
 
 from aiogram import F, Router, types
 from aiogram.fsm.context import FSMContext
@@ -74,38 +75,92 @@ async def cb_export(callback: CallbackQuery, uow, user: User) -> None:
     """Export security report as CSV and send to admin."""
     abuse = AntiAbuseService(uow)
     rep = await abuse.security_report()
-    path = tempfile.mktemp(suffix=".csv")
+    workdir = Path(tempfile.mkdtemp(prefix="noxbot_abuse_"))
+    path = workdir / "security_report.csv"
     import csv
-    with open(path, "w", newline="", encoding="utf-8-sig") as f:
-        w = csv.writer(f)
-        w.writerow(["type", "count"])
-        for k, v in rep["violations"].items():
-            w.writerow([k, v])
-        w.writerow([])
-        w.writerow(["blocked", rep["blocked_users"]])
-        w.writerow(["suspended", rep["suspended"]])
-        w.writerow(["blacklisted", rep["blacklisted"]])
-    from bot.keyboards.abuse import abuse_menu_keyboard
-    await callback.message.answer_document(types.FSInputFile(path), caption="گزارش امنیتی (CSV)")
+    try:
+        with path.open("w", newline="", encoding="utf-8-sig") as f:
+            w = csv.writer(f)
+            w.writerow(["type", "count"])
+            for k, v in rep["violations"].items():
+                w.writerow([k, v])
+            w.writerow([])
+            w.writerow(["blocked", rep["blocked_users"]])
+            w.writerow(["suspended", rep["suspended"]])
+            w.writerow(["blacklisted", rep["blacklisted"]])
+        await callback.message.answer_document(
+            types.FSInputFile(path), caption="گزارش امنیتی (CSV)"
+        )
+        api = AdminService(uow)
+        await api.log_action(
+            user, LogAction.EXPORT_REPORTS, target_type="abuse",
+            description="خروجی CSV گزارش امنیتی",
+        )
+        await uow.flush()
+        await uow.commit()
+    finally:
+        path.unlink(missing_ok=True)
+        if workdir.exists() and not any(workdir.iterdir()):
+            workdir.rmdir()
     await callback.answer("خروجی ارسال شد")
 
 
 @router.callback_query(F.data == "abuse:clear_counters")
 async def cb_clear_counters(callback: CallbackQuery, uow, user: User) -> None:
-    abuse = AntiAbuseService(uow)
-    # Reset all users' violation counters.
-    from sqlalchemy import update
+    """Ask before wiping every user's violation counter."""
+    from sqlalchemy import func, select
     from bot.models.user import User as _U
-    await uow.session.execute(update(_U).values(violation_count=0))
+    affected = (
+        await uow.session.execute(select(func.count(_U.id)).where(_U.violation_count > 0))
+    ).scalar_one()
+    keyboard = types.InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                types.InlineKeyboardButton(
+                    text="🧹 بله، پاک کن",
+                    callback_data="abuse:clear_counters_confirm",
+                )
+            ],
+            [back_button("admin:abuse")],
+        ]
+    )
+    await safe_edit_text(
+        callback,
+        "🧹 <b>پاک‌کردن شمارنده نقض‌ها</b>\n\n"
+        f"شمارنده {affected} کاربر صفر می‌شود و سابقه نقض آن‌ها از دست می‌رود.\n"
+        "ادامه؟",
+        reply_markup=keyboard,
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "abuse:clear_counters_confirm")
+async def cb_clear_counters_confirm(callback: CallbackQuery, uow, user: User) -> None:
+    from sqlalchemy import func, select, update
+    from bot.models.user import User as _U
+    affected = (
+        await uow.session.execute(select(func.count(_U.id)).where(_U.violation_count > 0))
+    ).scalar_one()
+    await uow.session.execute(
+        update(_U).where(_U.violation_count > 0).values(violation_count=0)
+    )
     await uow.flush()
 
     await uow.commit()
     api = AdminService(uow)
-    await api.log_action(user, LogAction.USER_EDIT, description="پاک‌کردن شمارنده نقض‌ها")
+    await api.log_action(
+        user, LogAction.USER_EDIT,
+        description=f"پاک‌کردن شمارنده نقض‌های {affected} کاربر",
+    )
     await uow.flush()
 
     await uow.commit()
-    await callback.answer("شمارنده‌ها پاک شد")
+    await callback.answer(f"شمارنده {affected} کاربر پاک شد", show_alert=True)
+    await safe_edit_text(
+        callback,
+        "🧹 شمارنده نقض‌ها پاک شد.",
+        reply_markup=single_button_kb(back_button("admin:abuse")),
+    )
 
 
 # --- Whitelist / blacklist ------------------------------------------------- #
@@ -188,18 +243,15 @@ async def cb_wl_del(callback: CallbackQuery, uow, user: User) -> None:
     except ValueError:
         await callback.answer("آیدی یافت نشد", show_alert=True)
         return
-    abuse = AntiAbuseService(uow)
-    await abuse.unblacklist_user(tg_id)
-    # also clear whitelist flag fully - use parameterized query
-    from sqlalchemy import update, text
+    from sqlalchemy import update
     from bot.models.user import User as _U
+    # Only the whitelist flag belongs to this button: it used to clear the
+    # blacklist flag as well, silently un-blacklisting the user.
     await uow.session.execute(
-        update(_U).where(_U.telegram_id == tg_id).values(
-            whitelisted=False, blacklisted=False
-        )
+        update(_U).where(_U.telegram_id == tg_id).values(whitelisted=False)
     )
     await uow.flush()
 
     await uow.commit()
-    await callback.answer("حذف شد")
+    await callback.answer("از لیست سفید حذف شد")
     await cb_wl_list(callback, uow, user)

@@ -341,6 +341,7 @@ fix → one proof test per defect that **fails on the pre-fix source**.
 | D20 | Financial filters: «تا» drops the last day, and product/category/admin/payment filters are inert | HIGH | OPEN — needs approval |
 | D21 | Backup targeted a hardcoded relative path; restore swapped the DB under the running bot (provably corrupting it) | **CRITICAL** | FIXED |
 | D22 | Backup/restore was gated by MANAGE_PAYMENTS — an operator could wipe the database | **CRITICAL** | FIXED |
+| D23 | Whitelist removal silently un-blacklisted the user; «پاککردن شمارنده» wiped every counter with one tap and no audit log; CSV export leaked files via `mktemp` | MEDIUM | FIXED |
 | — | Line-ending noise: orphans.py restored to the file's original CRLF convention | — | FIXED |
 | — | Router-gated callbacks are never answered (client spinner) | MEDIUM | OPEN — awaiting decision |
 
@@ -424,6 +425,11 @@ python3 -m pytest tests/audit/test_phase5_backup.py -q
 #   → 6 passed in 8.47s
 # pre-fix sources → collection error: has_pending_restore/sqlite_file_path missing
 #   (the validated staging API did not exist)
+
+# anti-abuse panel: whitelist side effect, counter wipe, export leak (D23)
+python3 -m pytest tests/audit/test_phase5_abuse.py -q
+#   → 3 passed in 5.79s
+# pre-fix admin_abuse.py, tests unchanged → 3 failed
 # pre-fix sources, tests unchanged → 6 failed (the real Telegram error is visible:
 #   "Bad Request: there is no media in the message to edit")
 
@@ -434,7 +440,7 @@ python3 -m pytest tests/audit/test_phase4_flows.py -q
 
 # full audit suite with the stricter harness semantics
 python3 -m pytest tests/audit -q
-#   → 87 passed, 2 xfailed in 107.55s   (was 81 before this batch)
+#   → 90 passed, 2 xfailed in 106.77s   (was 87 before this batch)
 
 # repository suite on a throwaway DB
 DATABASE_URL="sqlite+aiosqlite:////tmp/repo_p5.db" python3 -m pytest tests/ -q --ignore=tests/audit
@@ -598,6 +604,15 @@ Both are recorded as `xfail(strict=True)` in `tests/audit/test_phase5_finance.py
 
 ### 📋 NOTE — a deliberate behaviour change you should know about
 Restoring is no longer instant: the (validated) upload is staged and applied at the **next start**. That is the only way to swap a SQLite file safely; the alternative was a screen that reported success while corrupting the database. Nothing else about the feature changed, and the button text already told the admin a restart was required.
+
+### **BUG #D23 – the anti-abuse panel did things nobody asked for**
+**Where:** `bot/handlers/admin/admin_abuse.py` (`cb_wl_del`, `cb_clear_counters`, `cb_export`).
+
+1. **«حذف» in the whitelist also cleared the blacklist.** The handler called `unblacklist_user()` *and* wrote `whitelisted=False, blacklisted=False`, so removing a user from the whitelist silently lifted their blacklist (the exact opposite of a moderator's intent when both flags are set). It now clears only the whitelist flag and answers "از لیست سفید حذف شد".
+2. **One tap wiped every violation counter.** `abuse:clear_counters` immediately ran `UPDATE users SET violation_count = 0` — the whole anti-abuse history, no confirmation, no indication of scope, logged only as a bare «پاککردن شمارنده نقضها». It now first shows how many users are affected and asks for confirmation; the confirmed action logs the exact count.
+3. **The CSV export used `tempfile.mktemp()` (race-prone) and never deleted the file** — every export leaked a file in the temp directory. It now uses a private temp directory, sends the CSV from there and always cleans up, and the export is audit-logged like the financial one.
+
+**Proof:** `tests/audit/test_phase5_abuse.py` — a user flagged *both* whitelisted and blacklisted must stay blacklisted after the whitelist removal; the counters must survive the first tap and only reset after the confirmation button (with an audit entry); and no `*.csv` may be left behind in the temp directory. All three fail on the pre-fix source.
 
 **Still to read in this phase:** the admin handlers themselves — `admin_topup.py`
 (top-up approval, money), `admin_orders.py`, `admin_customs.py`, `admin_tickets.py`
