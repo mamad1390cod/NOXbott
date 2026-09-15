@@ -1,7 +1,7 @@
 """Admin discount code management handlers."""
 
 import logging
-from datetime import datetime, timezone
+
 
 from aiogram import F, Router, types
 from aiogram.fsm.context import FSMContext
@@ -23,6 +23,7 @@ from bot.services.discount_code import DiscountCodeService
 from bot.states import AdminDiscountCodeStates
 from bot.utils.editing import safe_edit_text
 from bot.utils.messages import require_text
+from bot.utils.clock import DEFAULT_FORMAT, format_local, local_now_str, parse_local, utc_now
 from bot.utils.format import format_price
 
 router = Router(name="admin_discounts")
@@ -53,9 +54,9 @@ def _discount_details_text(code) -> str:
     expiry_text = "ندارد"
     if code.expires_at:
         if code.is_expired:
-            expiry_text = f"❌ منقضی شده ({code.expires_at.strftime('%Y-%m-%d %H:%M')})"
+            expiry_text = f"❌ منقضی شده ({format_local(code.expires_at)})"
         else:
-            expiry_text = code.expires_at.strftime("%Y-%m-%d %H:%M")
+            expiry_text = format_local(code.expires_at)
 
     max_uses_text = "نامحدود" if code.max_uses is None else f"{code.max_uses} بار"
     remaining_text = "نامحدود" if code.remaining_uses is None else f"{code.remaining_uses} بار"
@@ -383,8 +384,9 @@ async def process_discount_value(message: Message, state: FSMContext, uow, user)
         text = (
             f"✅ مبلغ تخفیف: {format_price(value)} تومان\n\n"
             "📅 <b>تاریخ انقضا:</b>\n\n"
-            "تاریخ و ساعت را به فرمت زیر وارد کنید:\n"
+            "تاریخ و ساعت را به وقت محلی و به فرمت زیر وارد کنید:\n"
             "<code>YYYY-MM-DD HH:MM</code>\n\n"
+            f"🕒 اکنون: {local_now_str()}\n\n"
             "مثال: <code>2026-12-31 23:59</code>\n\n"
             "💡 برای بدون تاریخ انقضا، دکمه 'رد کردن' را بزنید."
         )
@@ -413,8 +415,9 @@ async def process_max_eligible(message: Message, state: FSMContext, uow, user) -
     text = (
         f"✅ حداکثر مبلغ مجاز: {format_price(amount)} تومان\n\n"
         "📅 <b>تاریخ انقضا:</b>\n\n"
-        "تاریخ و ساعت را به فرمت زیر وارد کنید:\n"
+        "تاریخ و ساعت را به وقت محلی و به فرمت زیر وارد کنید:\n"
         "<code>YYYY-MM-DD HH:MM</code>\n\n"
+        f"🕒 اکنون: {local_now_str()}\n\n"
         "مثال: <code>2026-12-31 23:59</code>\n\n"
         "💡 برای بدون تاریخ انقضا، دکمه 'رد کردن' را بزنید."
     )
@@ -439,8 +442,9 @@ async def cb_skip_max_eligible(callback: CallbackQuery, state: FSMContext, uow, 
     text = (
         "⏭ حداکثر مبلغ مجاز: نامحدود\n\n"
         "📅 <b>تاریخ انقضا:</b>\n\n"
-        "تاریخ و ساعت را به فرمت زیر وارد کنید:\n"
+        "تاریخ و ساعت را به وقت محلی و به فرمت زیر وارد کنید:\n"
         "<code>YYYY-MM-DD HH:MM</code>\n\n"
+        f"🕒 اکنون: {local_now_str()}\n\n"
         "مثال: <code>2026-12-31 23:59</code>\n\n"
         "💡 برای بدون تاریخ انقضا، دکمه 'رد کردن' را بزنید."
     )
@@ -457,24 +461,24 @@ async def process_expiration(message: Message, state: FSMContext, uow, user) -> 
         return
     
     try:
-        # Parse datetime in format YYYY-MM-DD HH:MM
-        expires_at = datetime.strptime(date_str, "%Y-%m-%d %H:%M").replace(tzinfo=timezone.utc)
-        
-        if expires_at <= datetime.now(timezone.utc):
-            await message.answer("❌ تاریخ انقضا باید در آینده باشد. لطفاً دوباره وارد کنید:")
-            return
+        # The admin types local time; the database stores UTC.
+        expires_at = parse_local(date_str, DEFAULT_FORMAT)
     except ValueError:
         await message.answer(
             "❌ فرمت تاریخ نادرست است. لطفاً به فرمت <code>YYYY-MM-DD HH:MM</code> وارد کنید:\n\n"
             "مثال: <code>2026-12-31 23:59</code>"
         )
         return
+
+    if expires_at <= utc_now():
+        await message.answer("❌ تاریخ انقضا باید در آینده باشد. لطفاً دوباره وارد کنید:")
+        return
     
     await state.update_data(expires_at=expires_at)
     await state.set_state(AdminDiscountCodeStates.waiting_max_uses)
     
     text = (
-        f"✅ تاریخ انقضا: {expires_at.strftime('%Y-%m-%d %H:%M')}\n\n"
+        f"✅ تاریخ انقضا: {format_local(expires_at)}\n\n"
         "🔢 <b>حداکثر تعداد استفاده:</b>\n\n"
         "چند بار این کد تخفیف قابل استفاده است؟\n\n"
         "💡 برای نامحدود، دکمه 'رد کردن' را بزنید."
@@ -696,14 +700,13 @@ def _edit_field_prompt(field: str, code) -> str:
         )
 
     if field == "expiration":
-        current = (
-            code.expires_at.strftime("%Y-%m-%d %H:%M") if code.expires_at else "ندارد"
-        )
+        current = format_local(code.expires_at) if code.expires_at else "ندارد"
         return (
             "📅 <b>ویرایش تاریخ انقضا</b>\n\n"
             f"مقدار فعلی: {current}\n\n"
-            "تاریخ و ساعت جدید را به فرمت زیر وارد کنید:\n"
+            "تاریخ و ساعت جدید را به وقت محلی و به فرمت زیر وارد کنید:\n"
             "<code>YYYY-MM-DD HH:MM</code>\n\n"
+            f"🕒 اکنون: {local_now_str()}\n\n"
             "مثال: <code>2026-12-31 23:59</code>"
         )
 
@@ -895,9 +898,7 @@ async def process_edit_expiration(message: Message, state: FSMContext, uow, user
     date_str = (message.text or "").strip()
 
     try:
-        expires_at = datetime.strptime(date_str, "%Y-%m-%d %H:%M").replace(
-            tzinfo=timezone.utc
-        )
+        expires_at = parse_local(date_str, DEFAULT_FORMAT)
     except ValueError:
         await message.answer(
             "❌ فرمت تاریخ نادرست است. لطفاً به فرمت <code>YYYY-MM-DD HH:MM</code> وارد کنید:\n\n"
@@ -905,7 +906,7 @@ async def process_edit_expiration(message: Message, state: FSMContext, uow, user
         )
         return
 
-    if expires_at <= datetime.now(timezone.utc):
+    if expires_at <= utc_now():
         await message.answer("❌ تاریخ انقضا باید در آینده باشد. لطفاً دوباره وارد کنید:")
         return
 

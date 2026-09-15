@@ -342,6 +342,7 @@ fix → one proof test per defect that **fails on the pre-fix source**.
 | D21 | Backup targeted a hardcoded relative path; restore swapped the DB under the running bot (provably corrupting it) | **CRITICAL** | FIXED |
 | D22 | Backup/restore was gated by MANAGE_PAYMENTS — an operator could wipe the database | **CRITICAL** | FIXED |
 | D23 | Whitelist removal silently un-blacklisted the user; «پاککردن شمارنده» wiped every counter with one tap and no audit log; CSV export leaked files via `mktemp` | MEDIUM | FIXED |
+| D24 | Datetimes from SQLite are naive UTC, but expiries were compared against a naive **local** `now` — every expiring discount code was dead on arrival off-UTC (and scheduled broadcasts fired at the wrong hour) | **HIGH** | FIXED |
 | — | Line-ending noise: orphans.py restored to the file's original CRLF convention | — | FIXED |
 | — | Router-gated callbacks are never answered (client spinner) | MEDIUM | OPEN — awaiting decision |
 
@@ -430,6 +431,11 @@ python3 -m pytest tests/audit/test_phase5_backup.py -q
 python3 -m pytest tests/audit/test_phase5_abuse.py -q
 #   → 3 passed in 5.79s
 # pre-fix admin_abuse.py, tests unchanged → 3 failed
+
+# the time convention: DB is UTC, admins are local (D24)
+python3 -m pytest tests/audit/test_phase5_timezone.py -q
+#   → 5 passed in 7.92s
+# pre-fix sources, tests unchanged → 4 failed, 1 passed
 # pre-fix sources, tests unchanged → 6 failed (the real Telegram error is visible:
 #   "Bad Request: there is no media in the message to edit")
 
@@ -440,7 +446,7 @@ python3 -m pytest tests/audit/test_phase4_flows.py -q
 
 # full audit suite with the stricter harness semantics
 python3 -m pytest tests/audit -q
-#   → 90 passed, 2 xfailed in 106.77s   (was 87 before this batch)
+#   → 95 passed, 2 xfailed in 126.81s   (was 90 before this batch)
 
 # repository suite on a throwaway DB
 DATABASE_URL="sqlite+aiosqlite:////tmp/repo_p5.db" python3 -m pytest tests/ -q --ignore=tests/audit
@@ -613,6 +619,27 @@ Restoring is no longer instant: the (validated) upload is staged and applied at 
 3. **The CSV export used `tempfile.mktemp()` (race-prone) and never deleted the file** — every export leaked a file in the temp directory. It now uses a private temp directory, sends the CSV from there and always cleans up, and the export is audit-logged like the financial one.
 
 **Proof:** `tests/audit/test_phase5_abuse.py` — a user flagged *both* whitelisted and blacklisted must stay blacklisted after the whitelist removal; the counters must survive the first tap and only reset after the confirmation button (with an audit entry); and no `*.csv` may be left behind in the temp directory. All three fail on the pre-fix source.
+
+### **BUG #D24 – every expiring discount code was dead on arrival (and broadcasts fired at the wrong hour)**
+**Where:** `bot/models/discount_code.py::is_expired` (the check that gates the whole discount feature), reached from `bot/repositories/discount_code.py::validate_code` → every checkout that uses a code.
+
+**What was wrong:** SQLite returns `DateTime(timezone=True)` columns **without** a timezone — a row stores the naive UTC wall clock. `is_expired` compared that value against `datetime.now(self.expires_at.tzinfo)`… and `tzinfo` is `None`, so it compared **naive UTC** with **naive local time**. Measured on a `TZ=Asia/Tehran` host with a code that expires in two hours:
+
+```
+read back   : 2026-09-15 08:14:12  | tzinfo: None
+is_expired  : True    ← the code is dead the moment it is created
+```
+
+So on any server that is not running on UTC (i.e. the actual deployment) **any code with an expiry date was unusable**, and the admin panel showed «❌ منقضی شده» right after creation — the single feature the discount panel exists for. The same naive-vs-UTC confusion made the admin's expiry *input* mean UTC: an admin typing `23:59` got a code that expired at 03:29 the next morning local time, and a broadcast scheduled for `18:30` fired at 22:00 local.
+
+**Fix (root, and now the project's documented convention — `bot/utils/clock.py`):** the database stores **UTC**; humans read and type **local** time.
+* `clock.as_utc()` restores the missing timezone (and `utc_now()`/`to_local()`/`parse_local()`/`format_local()` replace the ad-hoc copies of this pattern, two of which already existed in `services/broadcast.py` and `services/dashboard.py`).
+* `is_expired` now compares two aware UTC values — a code that expires in two hours is valid, on any host timezone.
+* The discount panel asks for and displays expiry times in local time (the prompt prints the current local time so the frame is unambiguous), and the broadcast scheduler does the same — its «(UTC)» confirmation label is gone because the time it shows is now the one the admin typed.
+
+**Note on scope:** this does not change where the datetime *is stored* (still the UTC column) nor any payment logic; it fixes when a deadline is considered reached.
+
+**Proof:** `tests/audit/test_phase5_timezone.py` (5 tests, run with `TZ=+03:30`): a code that expires in two hours must be accepted at checkout (it was rejected as expired); a full create-a-code flow must store `2030-01-01 20:00` local as `16:30` UTC and show `20:00` back on the detail screen; a broadcast scheduled for `18:30` local must be stored as `15:00` UTC; and a wall-clock time in the past must be refused. Pre-fix 4 of the 5 fail; post-fix all 5 pass.
 
 **Still to read in this phase:** the admin handlers themselves — `admin_topup.py`
 (top-up approval, money), `admin_orders.py`, `admin_customs.py`, `admin_tickets.py`

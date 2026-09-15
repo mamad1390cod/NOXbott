@@ -21,6 +21,7 @@ from bot.models.user import User
 from bot.services.admin import AdminService
 from bot.services.broadcast import BroadcastService
 from bot.states import BroadcastStates
+from bot.utils.clock import DEFAULT_FORMAT, format_local, parse_local, utc_now
 from bot.utils.messages import require_text
 
 router = Router(name="admin_broadcast")
@@ -149,7 +150,7 @@ async def do_schedule(message: Message, uow, user: User, state: FSMContext) -> N
     broadcast whose ``scheduled_at`` has passed — so this handler only has to
     store the intent.
     """
-    from datetime import datetime, timedelta, timezone
+    from datetime import timedelta
 
     raw = (message.text or "").strip()
     draft = _draft(user.telegram_id)
@@ -162,17 +163,17 @@ async def do_schedule(message: Message, uow, user: User, state: FSMContext) -> N
         )
         return
 
-    now = datetime.now(timezone.utc)
+    now = utc_now()
     if raw.lower() in {"now", "فوری", "الان"}:
         when = now
     else:
         when = None
-        for fmt in ("%Y-%m-%d %H:%M", "%Y/%m/%d %H:%M", "%Y-%m-%d"):
+        for fmt in (DEFAULT_FORMAT, "%Y/%m/%d %H:%M", "%Y-%m-%d"):
             try:
-                parsed = datetime.strptime(raw, fmt)
+                # The admin types local time; the database stores UTC.
+                when = parse_local(raw, fmt)
             except ValueError:
                 continue
-            when = parsed.replace(tzinfo=timezone.utc)
             break
         if when is None:
             await message.answer(
@@ -193,7 +194,7 @@ async def do_schedule(message: Message, uow, user: User, state: FSMContext) -> N
     api = AdminService(uow)
     await api.log_action(
         user, LogAction.BROADCAST_SEND, target_type="broadcast", target_id=b.id,
-        description=f"زمان‌بندی ارسال برای {when:%Y-%m-%d %H:%M}",
+        description=f"زمان‌بندی ارسال برای {format_local(when)}",
     )
     await uow.flush()
 
@@ -201,10 +202,9 @@ async def do_schedule(message: Message, uow, user: User, state: FSMContext) -> N
     _DRAFTS.pop(user.telegram_id, None)
     await state.clear()
 
-    local = when
     await message.answer(
         "⏰ <b>ارسال زمان‌بندی شد</b>\n\n"
-        f"🕒 زمان: {local:%Y-%m-%d %H:%M} (UTC)\n"
+        f"🕒 زمان: {format_local(when)} (به وقت محلی)\n"
         f"👥 مخاطب: {_audience_label(draft)}\n\n"
         "در زمان مقرر به‌صورت خودکار ارسال می‌شود.",
         reply_markup=single_button_kb(back_button("admin:broadcast")),

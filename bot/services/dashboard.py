@@ -10,6 +10,7 @@ from bot.models.user_dashboard import TransactionType
 from bot.services.base import BaseService
 from bot.database.uow import UnitOfWork
 from bot.models.ticket import TicketStatus
+from bot.utils.clock import as_utc, utc_now
 
 ACTIVE_STATUSES = [
     OrderStatus.WAITING_PAYMENT,
@@ -262,12 +263,8 @@ class UserDashboardService(BaseService):
             candidates.append("five_orders")
         if (user.total_spent or 0) >= 1_000_000:
             candidates.append("big_spender")
-        from datetime import datetime, timezone
         if user.created_at:
-            created = user.created_at
-            if created.tzinfo is None:
-                created = created.replace(tzinfo=timezone.utc)
-            if (datetime.now(timezone.utc) - created).days >= 30:
+            if (utc_now() - as_utc(user.created_at)).days >= 30:
                 candidates.append("member_30")
         for key in candidates:
             if key not in earned and await self.unlock_badge(user, key):

@@ -15,6 +15,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import Mapped, mapped_column
 
 from bot.models.base import Base, TimestampMixin, UUIDMixin
+from bot.utils.clock import as_utc, utc_now
 
 
 class DiscountType(str, enum.Enum):
@@ -96,10 +97,15 @@ class DiscountCode(Base, UUIDMixin, TimestampMixin):
 
     @property
     def is_expired(self) -> bool:
-        """Check if discount code is expired."""
+        """Check if discount code is expired.
+
+        ``expires_at`` comes back from SQLite without a timezone but is stored in
+        UTC; comparing it against a naive local ``datetime.now()`` marked every
+        code as expired as soon as the server was not running on UTC.
+        """
         if self.expires_at is None:
             return False
-        return datetime.now(self.expires_at.tzinfo) > self.expires_at
+        return utc_now() > as_utc(self.expires_at)
 
     @property
     def is_exhausted(self) -> bool:

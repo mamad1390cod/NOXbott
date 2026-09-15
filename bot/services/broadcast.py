@@ -13,6 +13,7 @@ from bot.models.broadcast import Broadcast, BroadcastStatus, MediaType
 from bot.models.user import User
 from bot.services.base import BaseService
 from bot.database.uow import UnitOfWork
+from bot.utils.clock import as_utc, utc_now
 
 logger = logging.getLogger(__name__)
 
@@ -322,11 +323,7 @@ class BroadcastService(BaseService):
 
 
 def _aware(dt) -> datetime:
-    if dt is None:
-        return datetime.now(timezone.utc)
-    if dt.tzinfo is None:
-        return dt.replace(tzinfo=timezone.utc)
-    return dt
+    return utc_now() if dt is None else as_utc(dt)
 
 
 def InlineButton(text: str, url: str | None = None, callback_data: str | None = None):

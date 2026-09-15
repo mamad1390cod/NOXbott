@@ -5,6 +5,7 @@ from typing import Sequence
 
 from bot.database.uow import UnitOfWork
 from bot.models.discount_code import DiscountCode, DiscountType
+from bot.utils.clock import as_utc, utc_now
 from bot.services.base import BaseService
 
 
@@ -84,8 +85,7 @@ class DiscountCodeService(BaseService):
         
         # Validate expiration
         if expires_at is not None:
-            now = datetime.now(expires_at.tzinfo)
-            if expires_at <= now:
+            if as_utc(expires_at) <= utc_now():
                 raise ValueError("تاریخ انقضا باید در آینده باشد")
         
         # Create discount code
@@ -235,8 +235,7 @@ class DiscountCodeService(BaseService):
         
         # Validate expiration if provided
         if expires_at is not None:
-            now = datetime.now(expires_at.tzinfo)
-            if expires_at <= now:
+            if as_utc(expires_at) <= utc_now():
                 raise ValueError("تاریخ انقضا باید در آینده باشد")
         
         # Update discount code

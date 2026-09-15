@@ -31,7 +31,12 @@ async def abroad_audience(callback: CallbackQuery) -> None:
 @router.callback_query(F.data == "abroad:schedule")
 async def abroad_schedule(callback: CallbackQuery, state: FSMContext) -> None:
     await state.set_state(BroadcastStates.waiting_schedule)
-    await callback.message.answer("⏰ زمان ارسال را ارسال کنید (YYYY-MM-DD HH:MM) یا 'now' برای فوری:")
+    from bot.utils.clock import local_now_str
+    await callback.message.answer(
+        "⏰ زمان ارسال را به وقت محلی وارد کنید (YYYY-MM-DD HH:MM) "
+        "یا بنویسید 'now' برای ارسال فوری:\n"
+        f"🕒 اکنون: {local_now_str()}"
+    )
     await callback.answer()
 
 
