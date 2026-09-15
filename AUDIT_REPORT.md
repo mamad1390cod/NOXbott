@@ -263,6 +263,38 @@ So the defect is not "a raised exception" but a *silently truncated handler*. It
 ### **BUG #D6 – Dead code in the custom-registration flow**
 `bot/handlers/custom_cart.py` contained a no-op accumulation (`total += 0`) in the price summary → removed (no behaviour change).
 
+## 🟠 HIGH — payment wiring, second pass (explicitly approved by the owner)
+
+### **BUG #D7 – 🔺 the card-payment-for-order flow was unreachable (the old O1)**
+**Where:** `bot/handlers/payments.py` (`pay:submit:`), `bot/keyboards/cart_keyboard.py` (`insufficient_balance_keyboard`), `bot/handlers/cart.py` (insufficient-balance screen), `bot/keyboards/order.py` (order detail), `bot/handlers/admin/admin_payments.py` (resend request).
+
+**Symptom:** a customer whose wallet balance was too low was told «موجودی کیف پول کافی نیست» and had **no path to buy at all** — while the entire card-receipt flow behind it (payment record, receipt upload, anti-abuse check and the admin approval that drives the order to APPROVED) was already implemented and working. A full payload census (170 exact filters, 162 prefix filters, 41 helper-emitted literals) confirmed that **nothing** emitted `pay:submit:<order_id>`.
+
+**Root cause:** the customer-facing entry point was never written, and the lifecycle lacked the step it needs: `create_order_from_cart` leaves an order in `PENDING`, while `PENDING → PAYMENT_UPLOADED` is not a legal transition — so even after sending a receipt the order could not advance (`submit_payment` raised, the receipt handler swallowed the error, and the order silently stayed PENDING while an admin was reviewing its receipt).
+
+**Fix (approved payment-wiring change):**
+* `insufficient_balance_keyboard` offers «💳 پرداخت کارتی و ارسال رسید» (`checkout:card`) and the cart screen text explains both options;
+* new handler `cb_checkout_card` creates the order with `create_order_from_cart(payment_method=CARD)`, moves it `PENDING → WAITING_PAYMENT` (the legal "instructions shown" step) and enters the receipt flow;
+* the receipt body is a single shared helper (`_begin_receipt_submission`) used by **both** `checkout:card` and `pay:submit:` — no duplicated flow;
+* the wallet-checkout screen shows the same choice screen instead of a bare alert with no way forward;
+* the order-detail keyboard offers «💳 ارسال رسید پرداخت» (`pay:submit:<order_id>`) for an unpaid card order, so the flow survives a lost conversation;
+* `OrderService.submit_payment` advances a still-`PENDING` order to `WAITING_PAYMENT` first, so no caller can leave an order silently stuck;
+* «🔄 درخواست رسید مجدد» (admin) now attaches the `pay:submit:` button — previously it told the customer to send a new receipt **with no way to do it**;
+* the rejection path releases the order to CANCELLED (verified) and notifies the customer.
+
+**Proof:** `tests/audit/test_checkout_payment.py` — `test_insufficient_balance_screen_offers_card_payment`, `test_card_checkout_creates_order_and_accepts_receipt`, `test_admin_approval_completes_the_card_order`, `test_request_receipt_again_reaches_the_customer`. All fail on the pre-fix sources with the tests unchanged. Assertions are on persisted state: order `WAITING_PAYMENT → PAYMENT_UPLOADED → APPROVED`, payment `PENDING → APPROVED`, stock consumed exactly once (5 → 4) and **the wallet untouched** (a card payment must not debit it).
+
+### **BUG #D8 – Admin payment review crashed on a lazy relationship (`MissingGreenlet`)**
+**Where:** `bot/handlers/admin/admin_payments.py` — `payment.user` accessed directly in the approve / reject / request-again notifications.
+
+**Symptom:** the admin's tap was never answered and the customer was never notified. Found by the new test `test_rejecting_a_card_payment_notifies_without_crashing`, which failed with `sqlalchemy.exc.MissingGreenlet` at `admin_payments.py:211` before the fix.
+
+**Root cause:** `payment.user` is a lazy relationship; touching it inside an async handler performs IO outside the greenlet and raises. The approve path happened to receive an eager-loaded payment (which is why approval worked), the reject and request-again paths did not.
+
+**Fix:** one helper — `_notify_payment_customer()` — resolves the customer with an explicit awaited `uow.users.get(payment.user_id)` and is used by all three notification sites, so the lazy load can no longer be reached.
+
+**Proof:** `test_request_receipt_again_reaches_the_customer` (MissingGreenlet pre-fix; also asserts the customer receives a working button) and `test_rejecting_a_card_payment_notifies_without_crashing`.
+
 ## ⚪ NOT-A-BUG (checked, documented to prevent re-litigation)
 
 ### **B3 – "Cancelling an order leaves a stale screen"**
@@ -273,16 +305,10 @@ So the defect is not "a raised exception" but a *silently truncated handler*. It
 
 ## 📋 REPORT-ONLY / RESIDUAL RISKS (not changed)
 
-### **O1 – 🔺 `pay:submit:<order_id>` has no producer: the card-payment-for-order flow is unreachable (needs your decision)**
-`bot/handlers/payments.py:159` implements receipt submission for an order (creates the `CARD` payment, sets `PaymentStates.waiting_receipt`), and **both** follow-up halves exist (`@router.message(PaymentStates.waiting_receipt, F.photo)` at line 205 and the text fallback at line 292). But a full census of every emitted callback payload (170 exact filters, 162 prefix filters, 41 helper-emitted literals) finds **no button anywhere that emits `pay:submit:<order_id>`**:
-* `insufficient_balance_keyboard` (`bot/keyboards/cart_keyboard.py:99`) offers only «💰 شارژ حساب» (`tu:menu`) and «🔙 بازگشت» (`menu:cart`);
-* `wallet_checkout_keyboard` offers only `checkout:confirm` + `menu:cart`;
-* `tests/audit/test_checkout_payment.py` never exercises the flow.
-
-**Consequence:** a customer without enough wallet balance is told to top up and has **no path to pay for the order by card**, even though the whole flow behind it is written. Two ways out — both are payment-logic decisions, so this is parked pending your explicit approval:
-* **(a) wire it up:** add a «💳 پرداخت کارتی و ارسال رسید» button to the insufficient-balance / cart screen (`pay:submit:{order_id}`);
-* **(b) delete it:** remove the unreachable handler, the `PaymentStates.waiting_receipt` state and its two message handlers.
-Nothing was changed here.
+### **O1 – ✅ RESOLVED (was: `pay:submit:<order_id>` had no producer)**
+See **BUG #D7 / #D8** above. The card-payment-for-order flow is reachable and verified
+end to end; wiring it up (rather than deleting it) was an explicit decision by the
+owner, which is why payment logic was touched at all.
 
 ### **O2 – The same D1 bug class still exists in 4 admin-scope sites (deferred to the admin phase)**
 `admin_backup.py:35`, `admin_backup.py:89`, `admin_orders.py:642`, `admin_payments.py:117` still call raw `edit_text`/`edit_media`. They are not customer flows, so they were left untouched and are listed here so the class is not lost.
@@ -312,7 +338,14 @@ python3 -m pytest tests/audit/test_phase4_flows.py -q
 
 # full audit suite (throwaway SQLite, no repo data touched)
 python3 -m pytest tests/audit -q
-#   → 30 passed in 52.27s          (was 24 passed before this phase)
+#   → 35 passed in 38.70s          (was 24 passed before this phase)
+
+# card-payment wiring (D7/D8) — in the file that never exercised this flow before
+python3 -m pytest tests/audit/test_checkout_payment.py -q
+#   → 12 passed in 13.20s
+# pre-fix sources, tests unchanged → 5 failed, 7 passed
+#   (insufficient-balance screen, card checkout, admin approval,
+#    request-receipt-again, reject-notification)
 
 # repository suite on a throwaway DB
 BOT_TOKEN=… OWNER_ID=… ADMIN_PASSWORD=… \

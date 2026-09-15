@@ -256,6 +256,17 @@ class OrderService(BaseService):
         is_system: bool = False,
     ) -> Order:
         """User uploads a payment receipt → PAYMENT_UPLOADED."""
+        # A receipt proves the payment instructions were shown, so an order
+        # still in PENDING (e.g. created by a caller that forgot the
+        # intermediate step) is advanced first. Without this the missing
+        # WAITING_PAYMENT step made transition_to raise, the receipt handler
+        # swallowed the error, and the order silently stayed PENDING while
+        # the admin was reviewing its receipt.
+        if order.status == OrderStatus.PENDING:
+            order = await self.transition_to(
+                order, OrderStatus.WAITING_PAYMENT,
+                is_system=is_system, note="نمایش دستور پرداخت",
+            )
         order = await self.transition_to(
             order, OrderStatus.PAYMENT_UPLOADED, is_system=is_system,
             note="رسید پرداخت ارسال شد",

@@ -63,6 +63,14 @@ class ShopDriver:
         await self.click(f"pay:submit:{order_id}")
         return await self.sim.send_photo(self.user_id, file_id=file_id)
 
+    async def checkout_card(self, file_id: str = "card_receipt_1") -> dict[str, Any]:
+        """Insufficient-balance journey: choose card payment and send the receipt."""
+        await self.click("cart:checkout")
+        res = await self.click("checkout:card")
+        if not res["ok"]:
+            return res
+        return await self.sim.send_photo(self.user_id, file_id=file_id)
+
 
 async def finish_account_info(user_id: str) -> None:
     """Mark a user as having complete customer info so add-to-cart is direct."""

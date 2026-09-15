@@ -22,6 +22,31 @@ router = Router(name="admin_payments")
 logger = logging.getLogger(__name__)
 
 
+async def _notify_payment_customer(
+    uow,
+    bot,
+    payment,
+    text: str,
+    reply_markup=None,
+) -> None:
+    """Notify the customer behind a payment without a lazy relationship load.
+
+    ``payment.user`` is a lazy attribute: touching it inside the async handler
+    raised ``MissingGreenlet`` and crashed the handler (the admin's tap was
+    never answered and the customer was never told anything). The row is
+    fetched explicitly instead — the identity map makes this free when the user
+    is already loaded.
+    """
+    if payment is None or not payment.user_id:
+        return
+    customer = await uow.users.get(payment.user_id)
+    if customer is None:
+        return
+    await NotificationService(bot, uow).notify_user(
+        customer.telegram_id, text, reply_markup=reply_markup
+    )
+
+
 @router.callback_query(F.data == "admin:payments")
 async def cb_admin_payments(callback: CallbackQuery) -> None:
     await safe_edit_text(callback, "💳 <b>مدیریت پرداخت‌ها</b>", reply_markup=admin_payments_keyboard())
@@ -150,9 +175,7 @@ async def cb_payment_approve(callback: CallbackQuery, uow, user: User, bot) -> N
     await uow.commit()
 
     # Notify user
-    if payment.user:
-        notifier = NotificationService(callback.bot, uow)
-        await notifier.notify_user(payment.user.telegram_id, PAYMENT_APPROVED())
+    await _notify_payment_customer(uow, callback.bot, payment, PAYMENT_APPROVED())
 
     await callback.answer("پرداخت تایید شد")
     await safe_edit_text(callback, "✅ پرداخت تایید شد.")
@@ -184,9 +207,7 @@ async def cb_payment_reject(callback: CallbackQuery, uow, user: User) -> None:
 
     await uow.commit()
 
-    if payment.user:
-        notifier = NotificationService(callback.bot, uow)
-        await notifier.notify_user(payment.user.telegram_id, PAYMENT_REJECTED())
+    await _notify_payment_customer(uow, callback.bot, payment, PAYMENT_REJECTED())
 
     await callback.answer("پرداخت رد شد")
     await safe_edit_text(callback, "❌ پرداخت رد شد.")
@@ -205,12 +226,23 @@ async def cb_payment_request_again(callback: CallbackQuery, uow, user: User) -> 
 
     await uow.commit()
 
-    # Notify user to resubmit receipt
-    if payment and payment.user:
-        notifier = NotificationService(callback.bot, uow)
-        await notifier.notify_user(
-            payment.user.telegram_id,
-            "🔄 رسید پرداخت شما قابل قبول نبود. لطفاً رسید جدید را ارسال کنید.",
+    # Notify user to resubmit receipt. The message used to give the customer
+    # no way to comply (no button, no state), so the request was a dead end;
+    # for order payments it now carries the ``pay:submit:`` entry point.
+    retry_markup = None
+    if payment and payment.order_id:
+        retry_markup = types.InlineKeyboardMarkup(
+            inline_keyboard=[[types.InlineKeyboardButton(
+                text="💳 ارسال رسید جدید",
+                callback_data=f"pay:submit:{payment.order_id}",
+            )]]
         )
+    await _notify_payment_customer(
+        uow,
+        callback.bot,
+        payment,
+        "🔄 رسید پرداخت شما قابل قبول نبود. لطفاً رسید جدید را ارسال کنید.",
+        reply_markup=retry_markup,
+    )
     await callback.answer("درخواست رسید مجدد ارسال شد")
     await safe_edit_text(callback, "🔄 درخواست رسید مجدد ارسال شد.")

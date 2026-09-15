@@ -97,8 +97,19 @@ def wallet_checkout_keyboard() -> InlineKeyboardMarkup:
 
 
 def insufficient_balance_keyboard() -> InlineKeyboardMarkup:
-    """Build keyboard for insufficient balance (redirect to topup)."""
+    """Keyboard for an insufficient wallet balance.
+
+    Offers both ways to finish the purchase: pay the order itself by card
+    (receipt + admin approval) or top the wallet up first. The card entry
+    point is ``checkout:card`` — without it the receipt flow behind
+    ``pay:submit:`` was unreachable.
+    """
     keyboard = [
+        [
+            InlineKeyboardButton(
+                text="💳 پرداخت کارتی و ارسال رسید", callback_data="checkout:card"
+            ),
+        ],
         [
             InlineKeyboardButton(text="💰 شارژ حساب", callback_data="tu:menu"),
         ],

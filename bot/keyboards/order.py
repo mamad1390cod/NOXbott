@@ -6,6 +6,7 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from bot.keyboards.common import back_button, home_button
 from bot.models.order import Order, OrderStatus, STATUS_LABELS
+from bot.models.payment import PaymentMethod
 from bot.utils.format import format_price
 
 
@@ -35,6 +36,19 @@ def my_orders_keyboard(orders: Sequence[Order], page: int = 0, total_pages: int 
 def user_order_detail_keyboard(order: Order) -> InlineKeyboardMarkup:
     """Keyboard for a single order (user view)."""
     keyboard = []
+    # A card order that has not been paid yet must offer the receipt step,
+    # otherwise closing the bot loses the payment path until an admin
+    # resends the request.
+    if (
+        order.payment_method == PaymentMethod.CARD
+        and order.status in (OrderStatus.PENDING, OrderStatus.WAITING_PAYMENT)
+    ):
+        keyboard.append([
+            InlineKeyboardButton(
+                text="💳 ارسال رسید پرداخت",
+                callback_data=f"pay:submit:{order.id}",
+            )
+        ])
     if order.can_cancel:
         keyboard.append([
             InlineKeyboardButton(text="🚫 لغو سفارش", callback_data=f"orders:cancel:{order.id}")

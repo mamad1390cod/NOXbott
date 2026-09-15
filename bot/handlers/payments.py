@@ -7,6 +7,7 @@ from aiogram import F, Router, types
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
+from bot.keyboards.cart_keyboard import insufficient_balance_keyboard
 from bot.keyboards.common import back_button
 from bot.models.payment import PaymentMethod
 from bot.models.user import User
@@ -47,9 +48,20 @@ async def cb_checkout_confirm(
     total_price = summary['final_total']
     wallet_balance = user.wallet_balance or 0
 
-    # Double-check balance before payment
+    # Double-check balance before payment: show the same choice screen as the
+    # cart view (card payment or top-up) instead of a bare alert with no way
+    # forward.
     if wallet_balance < total_price:
         await callback.answer("موجودی کافی نیست", show_alert=True)
+        await safe_edit_text(
+            callback,
+            "❌ <b>موجودی کیف پول کافی نیست</b>\n\n"
+            f"💳 مبلغ سفارش: <b>{format_price(total_price)} تومان</b>\n"
+            f"👛 موجودی فعلی: <b>{format_price(wallet_balance)} تومان</b>\n\n"
+            "می‌توانید مبلغ سفارش را کارتی پرداخت کنید و رسید بفرستید،\n"
+            "یا ابتدا کیف پول خود را شارژ کنید.",
+            reply_markup=insufficient_balance_keyboard(),
+        )
         return
 
     # Create order (discount is automatically applied from cart)
@@ -156,24 +168,20 @@ async def cb_checkout_confirm(
     await callback.answer("پرداخت موفق")
 
 
-@router.callback_query(F.data.startswith("pay:submit:"))
-async def cb_payment_submit(
+async def _begin_receipt_submission(
     callback: CallbackQuery,
-    uow, user: User,
+    uow,
+    user: User,
     state: FSMContext,
+    order_id: str,
+    order,
 ) -> None:
-    """Begin receipt submission for an order."""
-    parts = callback.data.split(":", 2)
-    if len(parts) < 3:
-        await callback.answer("سفارش یافت نشد", show_alert=True)
-        return
-    order_id = parts[2]
-    order_service = OrderService(uow)
-    order = await order_service.get_order(order_id)
-    if not order or order.user_id != user.id:
-        await callback.answer("سفارش یافت نشد", show_alert=True)
-        return
+    """Show the card details + ask for the receipt (shared by both entry points).
 
+    ``pay:submit:<order_id>`` (an existing order) and ``checkout:card`` (the
+    insufficient-balance screen) must land on exactly the same flow, so the body
+    lives here once.
+    """
     payment_service = PaymentService(uow)
     payments = await payment_service.get_user_payments(user.id)
     payment = next((p for p in payments if p.order_id == order_id), None)
@@ -191,15 +199,87 @@ async def cb_payment_submit(
     await state.set_data({"payment_id": payment.id, "order_id": order_id})
     await state.set_state(PaymentStates.waiting_receipt)
 
-    await safe_edit_text(callback, 
-        "📤 <b>ارسال رسید پرداخت</b>\n\n"
-        "لطفاً تصویر رسید پرداخت خود را ارسال کنید.\n"
-        "برای انصراف روی دکمه زیر بزنید.",
+    await safe_edit_text(
+        callback,
+        "\U0001F4E4 <b>\u0627\u0631\u0633\u0627\u0644 \u0631\u0633\u06cc\u062f \u067e\u0631\u062f\u0627\u062e\u062a</b>\n\n"
+        "\u0644\u0637\u0641\u0627\u064b \u062a\u0635\u0648\u06cc\u0631 \u0631\u0633\u06cc\u062f \u067e\u0631\u062f\u0627\u062e\u062a \u062e\u0648\u062f \u0631\u0627 \u0627\u0631\u0633\u0627\u0644 \u06a9\u0646\u06cc\u062f.\n"
+        "\u0628\u0631\u0627\u06cc \u0627\u0646\u0635\u0631\u0627\u0641 \u0631\u0648\u06cc \u062f\u06a9\u0645\u0647 \u0632\u06cc\u0631 \u0628\u0632\u0646\u06cc\u062f.",
         reply_markup=types.InlineKeyboardMarkup(
-            inline_keyboard=[[types.InlineKeyboardButton(text="❌ انصراف", callback_data="action:cancel")]]
+            inline_keyboard=[[types.InlineKeyboardButton(
+                text="\u274c \u0627\u0646\u0635\u0631\u0627\u0641", callback_data="action:cancel"
+            )]]
         ),
     )
     await callback.answer()
+
+
+@router.callback_query(F.data == "checkout:card")
+async def cb_checkout_card(
+    callback: CallbackQuery,
+    uow, user: User,
+    state: FSMContext,
+) -> None:
+    """Pay the cart by card: create the order and ask for the receipt.
+
+    This is the missing producer of the ``pay:submit:`` flow: without it the
+    receipt path (payment record + admin approval) had no customer-facing entry
+    point, so a customer without enough balance could not buy at all.
+    """
+    cart_service = CartService(uow)
+    summary = await cart_service.get_cart_summary(user.id)
+    if not summary["items"]:
+        await callback.answer("\u0633\u0628\u062f \u062e\u0631\u06cc\u062f \u062e\u0627\u0644\u06cc \u0627\u0633\u062a", show_alert=True)
+        return
+
+    order_service = OrderService(uow, notifier=NotificationService(callback.bot, uow))
+    try:
+        order = await order_service.create_order_from_cart(
+            user_id=user.id,
+            payment_method=PaymentMethod.CARD,
+        )
+        order = await order_service.get_order(order.id)
+        if order is None:
+            raise ValueError("\u0633\u0641\u0627\u0631\u0634 \u0627\u06cc\u062c\u0627\u062f \u0646\u0634\u062f")
+    except ValueError as e:
+        await callback.answer(str(e), show_alert=True)
+        return
+
+    # The order starts PENDING; showing the card details *is* the
+    # WAITING_PAYMENT step, and the receipt transition
+    # (WAITING_PAYMENT → PAYMENT_UPLOADED) is only legal from there.
+    from bot.models.order import OrderStatus
+
+    if order.status == OrderStatus.PENDING:
+        order = await order_service.transition_to(
+            order,
+            OrderStatus.WAITING_PAYMENT,
+            note="\u067e\u0631\u062f\u0627\u062e\u062a \u06a9\u0627\u0631\u062a\u06cc \u0627\u0646\u062a\u062e\u0627\u0628 \u0634\u062f",
+        )
+
+    await uow.flush()
+
+    await _begin_receipt_submission(callback, uow, user, state, order.id, order)
+
+
+@router.callback_query(F.data.startswith("pay:submit:"))
+async def cb_payment_submit(
+    callback: CallbackQuery,
+    uow, user: User,
+    state: FSMContext,
+) -> None:
+    """Begin receipt submission for an existing order."""
+    parts = callback.data.split(":", 2)
+    if len(parts) < 3:
+        await callback.answer("\u0633\u0641\u0627\u0631\u0634 \u06cc\u0627\u0641\u062a \u0646\u0634\u062f", show_alert=True)
+        return
+    order_id = parts[2]
+    order_service = OrderService(uow)
+    order = await order_service.get_order(order_id)
+    if not order or order.user_id != user.id:
+        await callback.answer("\u0633\u0641\u0627\u0631\u0634 \u06cc\u0627\u0641\u062a \u0646\u0634\u062f", show_alert=True)
+        return
+
+    await _begin_receipt_submission(callback, uow, user, state, order_id, order)
 
 
 @router.message(PaymentStates.waiting_receipt, F.photo)

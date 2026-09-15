@@ -255,7 +255,8 @@ async def cb_cart_checkout(
             f"💰 مبلغ سفارش: <b>{format_price(total_price)} تومان</b>\n"
             f"💳 موجودی فعلی: <b>{format_price(wallet_balance)} تومان</b>\n"
             f"📉 کسری: <b>{format_price(shortage)} تومان</b>\n\n"
-            "لطفاً ابتدا کیف پول خود را شارژ کنید."
+            "می‌توانید مبلغ سفارش را کارتی پرداخت کنید و رسید بفرستید،\n"
+            "یا ابتدا کیف پول خود را شارژ کنید."
         )
         from bot.keyboards.cart_keyboard import insufficient_balance_keyboard
         await safe_edit_text(callback, text, reply_markup=insufficient_balance_keyboard())
